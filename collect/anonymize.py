@@ -14,7 +14,7 @@ re_author_id = re.compile(r'"author_id": "([A-Za-z0-9_-]+)"')
 
 @click.command(help="Anonymize posts and store a mapping.")
 @click.argument("posts", type=click.File('r'), default=sys.stdin)
-@click.option("--map", "Path to .csv file (existing or will be created)", type=click.Path(file_okay=True, dir_okay=False, writable=True), default=None)
+@click.option("--map", help="Path to .csv file (existing or will be created)", type=click.Path(file_okay=True, dir_okay=False, writable=True), default=None)
 def main(posts, map):
     """
     Given posts file (or stdin) in .jsonl format, replaces all user mentions in the text, and author_ids in the
