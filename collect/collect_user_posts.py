@@ -159,6 +159,9 @@ def just_try(func):
             except prawcore.exceptions.RequestException as e:
                 logger.warning(f'no internet connection maybe? waiting 30 s [{e}]')
                 time.sleep(30)
+            except prawcore.exceptions.ServerError as e:
+                logger.warning(f'no internet connection maybe? waiting 60 s [{e}]')
+                time.sleep(60)
             except exceptions.ClientException as e:
                 logger.warning(f'something wrong with the comment? skipping [{e}]')
                 break
