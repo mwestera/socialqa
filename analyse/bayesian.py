@@ -35,12 +35,16 @@ Some used and/or potentially useful resources:
 """
 
 def main():
+    global do_sampling      # hmmmmmm
 
     # TODO make command line args
     DRAWS, TUNE, CHAINS = 500, 500, 4
     N_USERS, LENGTH, EFFECT = 10, 1000, .4
-    CACHE_FILE = 'cached_model.pkl' # Caching only works when data remains exactly the same
+    CACHE_FILE = 'cache.pkl' # Caching only works when data remains exactly the same
     SEED = 12345
+
+    if CACHE_FILE:
+        do_sampling = cached_to_disk(do_sampling, CACHE_FILE)
 
     logging.getLogger('pymc').info(f'Random seed: {SEED}')
     rng = np.random.default_rng(SEED)
@@ -55,20 +59,47 @@ def main():
     # model = build_autoregressive_model(df)    # TODO Work in progress
 
     with model:
-        # linear_prior = pm.sample_prior_predictive()   # to inspect if the prior even makes sense?
-        trace = cached_to_disk(pm.sample, cache=CACHE_FILE)(draws=DRAWS, tune=TUNE, chains=CHAINS)
+        results = do_sampling(model, draws=DRAWS, tune=TUNE, chains=CHAINS)
 
-    azsummary = az.summary(trace, round_to=2, var_names=['α', 'β', 'rho', 'tau', 'exposure'], filter_vars='like')
+    azsummary = az.summary(results['trace'], round_to=2, var_names=['α', 'β', 'rho', 'tau', 'exposure'], filter_vars='like')
     print(azsummary.to_string())
 
-    azplot = az.plot_trace(trace, combined=True, var_names=['α', 'β', 'rho', 'tau', 'exposure'], filter_vars='like')
+    azplot = az.plot_trace(results['trace'], combined=True, var_names=['α', 'β', 'rho', 'tau', 'exposure'], filter_vars='like')
     plt.show()
 
-    with model:
-        # variable was wrongly (?) called "linear_prior" in tutorial
-        posterior = pm.sample_posterior_predictive(trace=trace)
-    posterior_plot = plot_posterior(df, trace, posterior)
+    posterior_plot = plot_posterior(df, results['trace'], results['posterior'])
     plt.show()
+
+
+
+def cached_to_disk(func, cache):
+    logger = logging.getLogger('pymc')
+    @functools.wraps(func)
+    def inner(*args, **kwargs):
+        if cache:
+            try:
+                with open(cache, 'rb') as buff:
+                    data = cloudpickle.load(buff)
+                logger.info(f'Loaded cached results from {cache}')
+                return data
+            except FileNotFoundError:
+                pass
+        data = func(*args, **kwargs)
+        with open(cache, 'wb') as buff:
+            cloudpickle.dump(data, buff)
+            logger.info(f'Saved results to cache: {cache}')
+        return data
+    return inner
+
+
+
+def do_sampling(model, **kwargs):
+    with model:
+        trace = pm.sample(**kwargs)
+        posterior = pm.sample_posterior_predictive(trace=trace)
+        # linear_prior = pm.sample_prior_predictive()   # to inspect if the prior even makes sense?
+    data = {'trace': trace, 'posterior': posterior}
+    return data
 
 
 def simulate_post_history(length,
@@ -215,25 +246,6 @@ def plot_posterior(df, trace, posterior):
     ax[1].set_title("Posterior trend lines")
 
     return fig
-
-
-def cached_to_disk(func, cache):
-    logger = logging.getLogger('pymc')
-    @functools.wraps(func)
-    def inner(*args, **kwargs):
-        if cache:
-            try:
-                with open(cache, 'rb') as buff:
-                    data = cloudpickle.load(buff)
-                logger.info(f'Loaded cached results from {cache}')
-                return data
-            except FileNotFoundError:
-                pass
-        data = func(*args, **kwargs)
-        with open(cache, 'wb') as buff:
-            cloudpickle.dump(data, buff)
-        return data
-    return inner
 
 
 if __name__ == '__main__':
