@@ -9,6 +9,114 @@ import click
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+def plot_submissions_stacked_histogram_by_subreddit(df, top_n_subreddits=5, pdf=None):
+    """
+    Plot a stacked bar histogram showing the number of submissions over time for the top N subreddits.
+
+    Parameters:
+    - df: pandas DataFrame containing the data.
+    - top_n_subreddits: Number of top subreddits to display based on total submission count.
+    - pdf: PdfPages object to save the plot, if provided.
+    """
+    colors = ['#FF5733', '#33FF57', '#3357FF', '#F333FF', '#FFC300', '#50C878', '#FFD700']
+    
+    # Ensure 'created' is a datetime column
+    df['created_datetime'] = pd.to_datetime(df['created'])
+
+    # Filter for submissions only
+    submissions_df = df[df['type'] == 'submission']
+
+    # Group by subreddit and month, then count submissions
+    submissions_over_time = submissions_df.groupby(['subreddit_id', pd.Grouper(key='created_datetime', freq='M')]).size().unstack(fill_value=0)
+    
+    # Sum across all months to find the total submissions per subreddit, then get the top N
+    top_subreddits = submissions_over_time.sum(axis=1).nlargest(top_n_subreddits).index
+
+    # Filter the data to include only the top N subreddits
+    submissions_over_time_top_n = submissions_over_time.loc[top_subreddits]
+
+    # Plotting
+    plt.figure(figsize=(12, 8))
+    # Since we are plotting stacked bars, we start by plotting the bottom-most data first, then stack on top of it
+    bottom = np.zeros(len(submissions_over_time_top_n.columns))
+    for i, subreddit in enumerate(top_subreddits):
+        # Use modulo to cycle through colors if there are more subreddits than colors
+        color = colors[i % len(colors)]
+        plt.bar(submissions_over_time_top_n.columns, submissions_over_time_top_n.loc[subreddit], bottom=bottom, label=subreddit, color=color,width=10)
+        bottom += submissions_over_time_top_n.loc[subreddit].values
+
+    plt.title(f'Top {top_n_subreddits} Subreddits: Submissions Over Time')
+    plt.xlabel('Time')
+    plt.ylabel('Number of Submissions')
+    plt.xticks(rotation=45)
+    plt.legend(title='Subreddit ID')
+    plt.tight_layout()
+
+    if pdf:
+        pdf.savefig()  # Only save to PDF if a PdfPages object is provided
+        plt.close()
+def plot_activity_over_time_dual_axis(df, pdf=None):
+    """
+    Plot the count of comments and submissions over time with dual y-axes to accommodate different scales.
+    """
+    # Ensure 'created' is a datetime column
+    df['created_datetime'] = pd.to_datetime(df['created'])
+    
+    # Set 'created_datetime' as the DataFrame index
+    df.set_index('created_datetime', inplace=True)
+    
+    # Resample and count comments and submissions monthly
+    comments_over_time = df[df['type'] == 'comment'].resample('M').size()
+    submissions_over_time = df[df['type'] == 'submission'].resample('M').size()
+    
+    # Creating a figure and a set of subplots
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+    
+    color = 'tab:blue'
+    ax1.set_xlabel('Time')
+    ax1.set_ylabel('Comments', color=color)
+    ax1.plot(comments_over_time.index, comments_over_time.values, label='Comments', marker='o', linestyle='-', color=color)
+    ax1.tick_params(axis='y', labelcolor=color)
+    
+    # Instantiate a second axes that shares the same x-axis
+    ax2 = ax1.twinx()  
+    color = 'tab:red'
+    ax2.set_ylabel('Submissions', color=color)  
+    ax2.plot(submissions_over_time.index, submissions_over_time.values, label='Submissions', marker='x', linestyle='-', color=color)
+    ax2.tick_params(axis='y', labelcolor=color)
+    
+    fig.tight_layout()  # Otherwise the right y-label may be slightly clipped
+    plt.title('Activity Over Time (Dual Axes)')
+    if pdf:
+        pdf.savefig(fig)  # Only save to PDF if a PdfPages object is provided
+        plt.close(fig)
+def plot_activity_over_time(df, pdf=None):
+    """
+    Plot the count of comments and submissions over time.
+    """
+    # Ensure 'created' is a datetime column
+    df['created_datetime'] = pd.to_datetime(df['created'])
+    
+    # Set 'created_datetime' as the DataFrame index
+    df.set_index('created_datetime', inplace=True)
+    
+    # Resample and count comments and submissions monthly
+    comments_over_time = df[df['type'] == 'comment'].resample('M').size()
+    submissions_over_time = df[df['type'] == 'submission'].resample('M').size()
+    
+    plt.figure(figsize=(12, 6))
+    plt.plot(comments_over_time.index, comments_over_time.values, label='Comments', marker='o', linestyle='-', color='blue')
+    plt.plot(submissions_over_time.index, submissions_over_time.values, label='Submissions', marker='x', linestyle='-', color='red')
+    
+    plt.title('Activity Over Time')
+    plt.xlabel('Time')
+    plt.ylabel('Count')
+    plt.legend()
+    plt.tight_layout()
+    
+    if pdf:
+        pdf.savefig()  # Only save to PDF if a PdfPages object is provided
+        plt.close()
 def subm_ques_reply(df,pdf):
     df_filtered=df[df["type"]=="comment"]
     # Convert 'replies' to a boolean indicating if a comment received a reply
@@ -283,11 +391,13 @@ def plot_distribution(df, column_name, type_value, title, xlabel, ylabel, bins=5
         plt.close() 
 def plot_comments_per_subreddit(df, pdf):
     plt.figure(figsize=(10, 6))
-    # Calculate the average number of comments per subreddit and sort
+    #Calculate the average number of comments per subreddit and sort
+    
     avg_comments_per_subreddit = df.groupby('subreddit')['num_comments'].mean()
     sorted_avg_comments = avg_comments_per_subreddit.sort_values()
 
-    # Generate cumulative counts for y-axis
+
+    #Generate cumulative counts for y-axis
     cumulative_counts = np.arange(1, len(sorted_avg_comments) + 1)
 
     # Plotting
@@ -315,12 +425,18 @@ def plot_comments_per_subreddit(df, pdf):
 @click.command()
 @click.option("--json-path", type=click.Path(dir_okay=False, exists=True), help="Path to the JSON Lines file.")
 def main(json_path):
+    print("----------------------")
     df = load_jsonl_to_dataframe(json_path)
     replies_df= child_replies_df(df) #non user replies
     submission_df = parent_submission_df(df) #non user submissions
     submission_df['body'] = submission_df['selftext']
     print(submission_df.columns)
     with PdfPages('data_plots_json.pdf') as pdf:
+        # Over TIME
+        plot_activity_over_time(df, pdf)
+        plot_activity_over_time_dual_axis(df,pdf)
+        plot_submissions_stacked_histogram_by_subreddit(df, 5, pdf)
+
         # Types
         plot_types_distr(df, pdf)
         subm_ques_reply(df,pdf)
