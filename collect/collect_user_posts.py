@@ -16,7 +16,7 @@ from praw import Reddit, exceptions
 import prawcore.exceptions
 
 """
-Collects submissions and comments of a user, newest first, up to Reddit's API limit (1000 each).
+Collects submissions and comments of a user, TOP first, up to Reddit's API limit (1000 each).
 Optionally save only submissions/comments from a given subreddit (but the others will add to the 1000 cap).
 Posts are stored together with some parents and some replies.
 
@@ -31,12 +31,14 @@ $ python collect_user_posts.py collected/users_conspiracy.jsonl > collected/post
 # TODO: What if internet connection breaks?
 
 @click.command(help="Collect Reddit posts (submissions and comments) from a user (optionally: in a specific subreddit); USERNAME is the name of the user to collect posts from, or a jsonl file containing redditors.")
-@click.argument("username", type=str)
+@click.argument("username", type=str)   # TODO: Allow reading from stdin?
 @click.option("--n_posts", help="The maximum number of posts", type=int, required=False, default=None)
 @click.option("--n_parents", help="The number of parents of posts to download, for context", type=int, required=False, default=None)
 @click.option("--subreddit", help="The name of the subreddit to collect posts from", type=str, required=False, default=None)
+@click.option("--which", help="Whether to collect the 1000 newest or top submissions and comments", type=click.Choice(["new", "top"]), required=False, default=None)
+@click.option("--reuse_posts", help="A .jsonl file to reuse already downloaded posts from.", type=click.Path(exists=True), required=False, default=None)
 @click.option("--log", type=click.Path(dir_okay=False, exists=False), default=None)
-def main(username, n_posts, n_parents, subreddit, log):
+def main(username, n_posts, n_parents, subreddit, which, reuse_posts, log):
     """
     Queries reddit for posts by the username (or .jsonl-file with users), printing the resulting dictionaries as json.
     """
@@ -70,12 +72,20 @@ def main(username, n_posts, n_parents, subreddit, log):
 
     logger.info(f"Will seek posts of {len(usernames)} usernames.")
 
+    if reuse_posts:
+        with open(reuse_posts, 'r') as file:
+            items = [json.loads(line) for line in file]
+        logger.info(f"Found {len(items)} posts to reuse, from {reuse_posts}.")
+        posts_to_reuse = {item["id"]: item for item in items}      # "name": "t3_1axf6zs"
+    else:
+        posts_to_reuse = None
+
     for username in usernames:
-        for post in collect_user_posts(username, subreddit, n_posts, n_parents, logger=logger):
+        for post in collect_user_posts(username, subreddit, n_posts, n_parents, logger=logger, reuse_posts=posts_to_reuse, which=which):
             print(json.dumps(post))
 
 
-def collect_user_posts(username, subreddit=None, n_posts=None, n_parents=None, logger=logging):
+def collect_user_posts(username, subreddit=None, n_posts=None, n_parents=None, logger=logging, reuse_posts=None, which=None):
     """
     First collects submissions, then posts, yielding dictionaries one at a time.
     """
@@ -92,9 +102,16 @@ def collect_user_posts(username, subreddit=None, n_posts=None, n_parents=None, l
 
     user = reddit.redditor(username)
 
+    submission_generator = user.submissions.top if which == "top" else user.submissions.new if which == "new" else None
+    comment_generator = user.comments.top if which == "top" else user.comments.new if which == "new" else None
+
     count = 0
 
-    for n_submission, submission in enumerate(user.submissions.new(limit=n_posts)):
+    for n_submission, submission in enumerate(submission_generator(limit=n_posts)):
+
+        if reuse_posts and (duplicate := reuse_posts.get(submission.id, False)):
+            logger.info(f'Reusing existing submission {submission.id}.')
+            yield duplicate
 
         if (n_submission + 1) % 50 == 0:
             logger.info(f'Submissions found for {username}: {count} (now checking submission {n_submission})')
@@ -115,7 +132,11 @@ def collect_user_posts(username, subreddit=None, n_posts=None, n_parents=None, l
 
     count2 = 0
 
-    for n_comment, comment in enumerate(user.comments.new(limit=None)):
+    for n_comment, comment in enumerate(comment_generator(limit=None)):
+
+        if reuse_posts and (duplicate := reuse_posts.get(comment.id, False)):
+            logger.info(f'Reusing existing comment {comment.id}.')
+            yield duplicate
 
         if (n_comment + 1) % 50 == 0:
             logger.info(f'Comments found for {username}: {count2} (now checking comment {n_comment})')
@@ -207,7 +228,8 @@ def comment_to_dict(comment, n_parents=None, logger=logging, with_replies=True, 
     comment_dict = {
         'type': 'comment',
         'author_id': author_id,
-        'subreddit': comment.subreddit_id,
+        'subreddit_id': comment.subreddit.name,
+        'subreddit_name': comment.subreddit.display_name,
         'created': utc_to_str(comment.created_utc),
         'submission': submission,
         'replies': replies,
@@ -239,9 +261,9 @@ def submission_to_dict(submission, logger=logging, with_replies=True):
 
     submission_dict = {
         'type': 'submission',
-        'subreddit_id': submission.subreddit.id,
         'author_id': author_id,
-        'subreddit': submission.subreddit.name,
+        'subreddit_id': submission.subreddit.name,
+        'subreddit_name': submission.subreddit.display_name,
         'created': utc_to_str(submission.created_utc),
         'parent': None,
         'replies': replies,
