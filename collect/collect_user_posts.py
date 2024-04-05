@@ -29,6 +29,7 @@ $ python collect_user_posts.py collected/users_conspiracy.jsonl > collected/post
 
 
 # TODO: What if internet connection breaks?
+# TODO: Make restarting easier: look up last user id and post id in the posts file.
 
 @click.command(help="Collect Reddit posts (submissions and comments) from a user (optionally: in a specific subreddit); USERNAME is the name of the user to collect posts from, or a jsonl file containing redditors.")
 @click.argument("username", type=str)   # TODO: Allow reading from stdin?
@@ -37,11 +38,13 @@ $ python collect_user_posts.py collected/users_conspiracy.jsonl > collected/post
 @click.option("--subreddit", help="The name of the subreddit to collect posts from", type=str, required=False, default=None)
 @click.option("--which", help="Whether to collect the 1000 newest or top submissions and comments", type=click.Choice(["new", "top"]), required=False, default=None)
 @click.option("--reuse_posts", help="A .jsonl file to reuse already downloaded posts from.", type=click.Path(exists=True), required=False, default=None)
+@click.option("--continue_posts", help="A .jsonl file from which to continue downloading posts (typically the same .jsonl file to which the results are piped).", type=click.Path(exists=True), required=False, default=None)
 @click.option("--log", type=click.Path(dir_okay=False, exists=False), default=None)
-def main(username, n_posts, n_parents, subreddit, which, reuse_posts, log):
+def main(username, n_posts, n_parents, subreddit, which, reuse_posts, continue_posts, log):
     """
     Queries reddit for posts by the username (or .jsonl-file with users), printing the resulting dictionaries as json.
     """
+    global skip_until
 
     dotenv.load_dotenv()
 
@@ -61,28 +64,43 @@ def main(username, n_posts, n_parents, subreddit, which, reuse_posts, log):
     logger.info(' '.join(sys.argv))
     logger.info(datetime.datetime.now().__str__())
 
+    if reuse_posts:
+        with open(reuse_posts, 'r') as file:
+            posts_to_reuse = set(json.loads(line)["id"] for line in file)
+        logger.info(f"Found {len(posts_to_reuse)} posts to reuse, from {reuse_posts}.")
+        # posts_to_reuse = {item["id"]: item for item in items}
+    else:
+        posts_to_reuse = None
+
+    if continue_posts:
+        with open(continue_posts, 'r') as file:
+            for line in file:
+                if line.strip():
+                    last_line = line
+        skip_until = json.loads(last_line)
+    else:
+        skip_until = None
+
     if username.endswith('.jsonl'):
         usernames = []
         with open(username, 'r') as namesfile:
             for line in namesfile:
                 user_dict = json.loads(line)
-                usernames.append(user_dict['name'])
+                name = user_dict['name']
+                if skip_until and skip_until['author_id'] == user_dict['id']:
+                    usernames = []
+                usernames.append(name)
     else:
         usernames = [username]
 
-    logger.info(f"Will seek posts of {len(usernames)} usernames.")
-
-    if reuse_posts:
-        with open(reuse_posts, 'r') as file:
-            items = [json.loads(line) for line in file]
-        logger.info(f"Found {len(items)} posts to reuse, from {reuse_posts}.")
-        posts_to_reuse = {item["id"]: item for item in items}      # "name": "t3_1axf6zs"
-    else:
-        posts_to_reuse = None
+    logger.info(f"Will seek posts of {len(usernames)} usernames (starting from {usernames[0]}).")
 
     for username in usernames:
-        for post in collect_user_posts(username, subreddit, n_posts, n_parents, logger=logger, reuse_posts=posts_to_reuse, which=which):
-            print(json.dumps(post))
+        try:
+            for post in collect_user_posts(username, subreddit, n_posts, n_parents, logger=logger, reuse_posts=posts_to_reuse, which=which):
+                print(json.dumps(post))
+        except prawcore.exceptions.Forbidden as e:
+            logging.warning(f'Skipping user {username} altogether: encountered Forbidden: {e}')
 
 
 def collect_user_posts(username, subreddit=None, n_posts=None, n_parents=None, logger=logging, reuse_posts=None, which=None):
@@ -102,21 +120,44 @@ def collect_user_posts(username, subreddit=None, n_posts=None, n_parents=None, l
 
     user = reddit.redditor(username)
 
-    submission_generator = user.submissions.top if which == "top" else user.submissions.new if which == "new" else None
-    comment_generator = user.comments.top if which == "top" else user.comments.new if which == "new" else None
+    if skip_until is None or skip_until['type'] == 'submission':
+        for sub in collect_submissions(user, username, subreddit, which, n_posts, reuse_posts, logger):
+            yield sub
+    for comment in collect_comments(user, username, subreddit, which, n_posts, reuse_posts, logger, n_parents):
+        yield comment
+
+
+def collect_submissions(user, username, subreddit, which, n_posts, reuse_posts, logger):
+
+    global skip_until
 
     count = 0
+    if which == "top":
+        submissions = user.submissions.top(limit=n_posts)
+    elif which == "new":
+        submissions = user.submissions.new(limit=n_posts)
 
-    for n_submission, submission in enumerate(submission_generator(limit=n_posts)):
-
-        if reuse_posts and (duplicate := reuse_posts.get(submission.id, False)):
-            logger.info(f'Reusing existing submission {submission.id}.')
-            yield duplicate
+    for n_submission, submission in enumerate(submissions):
 
         if (n_submission + 1) % 50 == 0:
             logger.info(f'Submissions found for {username}: {count} (now checking submission {n_submission})')
             logger.info('Taking a brief pause.')
             time.sleep(30)
+
+        if skip_until and skip_until['id'] == submission.id:
+            skip_until = None
+            continue
+
+        if skip_until:
+            continue
+
+        # if reuse_posts and (duplicate := reuse_posts.get(submission.id, False)):
+        if reuse_posts and (submission.id in reuse_posts):
+            logger.info(f'Reusing existing submission {submission.id}.')
+            yield {"type": "submission", "DUPLICATE": submission.id, "id": submission.id, "author_id": user.id}
+            count += 1
+            # yield duplicate
+            continue
 
         if subreddit and subreddit != submission.subreddit:
             continue
@@ -130,18 +171,39 @@ def collect_user_posts(username, subreddit=None, n_posts=None, n_parents=None, l
             logger.info(f'Couldn\'t turn submission {submission} to dict.')
         count += 1
 
+
+def collect_comments(user, username, subreddit, which, n_posts, reuse_posts, logger, n_parents):
+
+    global skip_until
+
+    if which == "top":
+        comments = user.comments.top(limit=n_posts)
+    elif which == "new":
+        comments = user.comments.new(limit=n_posts)
+
     count2 = 0
 
-    for n_comment, comment in enumerate(comment_generator(limit=None)):
-
-        if reuse_posts and (duplicate := reuse_posts.get(comment.id, False)):
-            logger.info(f'Reusing existing comment {comment.id}.')
-            yield duplicate
+    for n_comment, comment in enumerate(comments):
 
         if (n_comment + 1) % 50 == 0:
             logger.info(f'Comments found for {username}: {count2} (now checking comment {n_comment})')
             logger.info('Taking a brief pause.')
             time.sleep(30)
+
+        if skip_until and skip_until['id'] == comment.id:
+            skip_until = None
+            continue
+
+        if skip_until:
+            continue
+
+        # if reuse_posts and (duplicate := reuse_posts.get(comment.id, False)):
+        if reuse_posts and (comment.id in reuse_posts):
+            logger.info(f'Reusing existing comment {comment.id}.')
+            yield {"type": "comment", "DUPLICATE": comment.id, "id": comment.id, "author_id": user.id}
+            count2 += 1
+            # yield duplicate
+            continue
 
         if subreddit and subreddit != comment.subreddit:
             continue
@@ -185,6 +247,9 @@ def just_try(func):
                 time.sleep(60)
             except exceptions.ClientException as e:
                 logger.warning(f'something wrong with the comment? skipping [{e}]')
+                break
+            except prawcore.exceptions.Forbidden as e:
+                logger.warning(f'comment forbidden? skipping [{e}]')
                 break
             else:
                 return result
