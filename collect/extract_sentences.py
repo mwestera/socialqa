@@ -9,8 +9,6 @@ import termplotlib
 import numpy as np
 import itertools
 
-logging.basicConfig(level=logging.INFO)
-
 """
 Extract sentences from posts and their context (submission, parents, replies), using either the spacy 
 tokenizer (slow!) or regex (fast!). If input is not posts but sentences, will only recompute pivot and question scores. 
@@ -48,6 +46,9 @@ $ python extract_sentences.py collected/sentences_conspiracy.jsonl > collected/s
 @click.argument("file", type=click.File('r'), default=sys.stdin)
 @click.option("--use_spacy", help="Whether to use Spacy (slow); if not, uses simple regex (super fast).", type=bool, required=False, is_flag=True)
 def main(file, use_spacy):
+
+    logging.basicConfig(level=logging.INFO)
+
     nlp = spacy.load('en_core_web_sm') if use_spacy else None
 
     first_line = next(file)
