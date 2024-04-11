@@ -11,7 +11,7 @@ import itertools
 
 """
 Extract sentences from posts and their context (submission, parents, replies), using either the spacy 
-tokenizer (slow!) or regex (fast!). If input is not posts but sentences, will only recompute pivot and question scores. 
+tokenizer (slow!) or regex (fast!). 
 
 Prints each sentence as a json dictionary, storing the text along with various meta-info, like this:
 
@@ -27,22 +27,19 @@ Prints each sentence as a json dictionary, storing the text along with various m
     "from": "reply_comment" <relation of the post from which this sentence came, to the user post>, 
     "from_user": false <whether the post from which this sentence came, was from the same author as the user post>,
     "score": 7,
-    "user_post_id": "l69bg5",
-    "user_post_author_id": "dxbdv3i", 
+    "user_post_id": "blabla",
+    "user_post_author_id": "blibli", 
     "subreddit_name": "jazzguitar",
     "user_post_created": "2021-01-27 17:13:42"
 }
 
 Example:
-$ python extract_sentences.py collected/sentences_conspiracy_top_anon.jsonl > collected/sentences_conspiracy.jsonl
+$ python extract_sentences.py collected/posts_conspiracy_top_anon.jsonl > collected/sentences_conspiracy.jsonl
 
-Or to update only scores (input file already tokenized):
-
-$ python extract_sentences.py collected/sentences_conspiracy.jsonl > collected/sentences_conspiracy2.jsonl
 """
 
 @click.command(help="Extract sentences from posts and their context. Prints each sentence as a json dictionary, storing "
-                    "the text along with various meta-info. If file is already sent-tokenized, only recomputes scores.")
+                    "the text along with various meta-info.")
 @click.argument("file", type=click.File('r'), default=sys.stdin)
 @click.option("--use_spacy", help="Whether to use Spacy (slow); if not, uses simple regex (super fast).", type=bool, required=False, is_flag=True)
 def main(file, use_spacy):
@@ -51,146 +48,20 @@ def main(file, use_spacy):
 
     nlp = spacy.load('en_core_web_sm') if use_spacy else None
 
-    first_line = next(file)
-    first_item = json.loads(first_line)
-    already_sentences = 'start' in first_item
-    if already_sentences:
-        logging.info('Input is already sentence-tokenized; only recomputing scores.')
-
-    # for logging only
-    pivot_scores = []
-    question_scores = []
-    n_lines = 0
-
-    for line in itertools.chain([first_line], file):
+    n_sentences = 0
+    n_post = 0
+    for n_post, line in enumerate(file):
         item = json.loads(line)
-        n_lines += 1
-        sentences = [item] if already_sentences else extract_sentences_from_post(item, nlp)
-        for sentence in sentences:
-            pivot_score = get_pivot_score(sentence)
-            question_score = get_question_score(sentence)
-            sentence['pivot_score'] = pivot_score
-            sentence['question_score'] = question_score
-            pivot_scores.append(pivot_score)
-            question_scores.append(question_score)
+        for sentence in extract_sentences_from_post(item, nlp):
+            n_sentences += 1
             print(json.dumps(sentence))
 
-    if already_sentences:
-        logging.info(f'Recomputed scores for {len(pivot_scores)} sentences.')
-    else:
-        logging.info(f'Extracted {len(pivot_scores)} sentences from {n_lines} posts.')
+    logging.info(f'Extracted {n_sentences} sentences from {n_post} posts.')
 
-    pivot_scores_nonnull = [s for s in pivot_scores if s > -99]
-    question_scores_nonnull = [s for s in question_scores if s > -99]
-
-    counts, bin_edges = np.histogram(pivot_scores_nonnull, bins=8)
-    fig = termplotlib.figure()
-    fig.hist(counts, bin_edges, force_ascii=False)
-    logging.info(f'Pivot scores:\n{fig.get_string()}\nmin={min(pivot_scores_nonnull)}, max={max(pivot_scores_nonnull)},'
-                 f'mean={sum(pivot_scores_nonnull) / len(pivot_scores_nonnull):.2f},'
-                 f'N={len(pivot_scores_nonnull)} ({100*len(pivot_scores_nonnull) / len(pivot_scores):.2f}%)')
-
-    counts, bin_edges = np.histogram(question_scores_nonnull, bins=8)
-    fig = termplotlib.figure()
-    fig.hist(counts, bin_edges, force_ascii=False)
-    logging.info(f'Question scores:\n{fig.get_string()}\nmin={min(question_scores_nonnull)}, max={max(question_scores)},'
-                 f'mean={sum(question_scores_nonnull) / len(question_scores_nonnull):.2f},'
-                 f'N={len(question_scores_nonnull)} ({100*len(question_scores_nonnull) / len(question_scores):.2f}%)')
+    # TODO: This might be a good place to log some sentence-level stats like sentence length and num questions?
 
 
 sentence_regex = re.compile(r'([A-Z][^.!?]*[.!?]+)', re.M)
-
-
-def get_pivot_score(sentence):
-    score = 0
-    text = sentence['text']
-
-    if text.endswith('?'):
-        return -99
-    if sentence['from_user']:
-        return -99
-
-    sentence_from = sentence['from']
-    tokens = text.split()
-
-    if sentence_from in ['root_submission_title']:
-        score = 5
-    elif sentence_from in ['root_submission_text', 'parent_comment']:
-        score = 4
-    elif sentence_from in ['reply_comment']:
-        score = 3
-
-    # punish personal/subjective things:
-    if 'I' in tokens:
-        score -= 1
-    if 'you' in tokens:
-        score -= 0.5
-
-    if text.endswith('!'):
-        score -= 1
-
-    # punish too short/too long pivots:
-    if len(tokens) < 5:
-        score -= 3
-    elif len(tokens) < 10:
-        score -= 2
-    elif len(tokens) < 15:
-        score -= 1
-    elif len(tokens) > 35:
-        score -= 1
-    elif len(tokens) > 50:
-        score -= 2
-    elif len(tokens) > 70:
-        score -= 3
-
-    return score
-
-
-def get_question_score(sentence):
-    score = 0
-
-    text = sentence['text']
-    tokens = text.split()
-
-    if not text.endswith('?'):
-        return -99
-
-    sentence_from = sentence['from']
-
-    if sentence_from in ['user_submission_title']:
-        score = 5
-    elif sentence_from in ['user_submission_text']:
-        score = 4.5
-    elif sentence_from in ['user_comment']:
-        score = 4
-    else:
-        if sentence_from in ['root_submission_title']:
-            score = 3
-        elif sentence_from in ['root_submission_text', 'parent_comment']:
-            score = 2.5
-        elif sentence_from in ['reply_comment']:
-            score = 2
-
-        if sentence['from_user']:
-            score += 1
-
-    # punish personal/subjective things:
-    if 'I' in tokens:
-        score -= .5
-    if 'you' in tokens:
-        score -= 1
-
-    # punish too short/too long questions
-    if len(tokens) < 5:
-        score -= 2
-    elif len(tokens) < 10:
-        score -= 1
-    elif len(tokens) > 25:
-        score -= 1
-    elif len(tokens) > 30:
-        score -= 2
-
-    return score
 
 
 def extract_sentences_from_post(user_post: dict, nlp: Optional[spacy.Language] = None) -> Iterator[dict]:
