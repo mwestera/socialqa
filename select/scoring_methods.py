@@ -5,6 +5,7 @@ def get_pivot_score(sentence: pd.Series):
 
     # TODO Take into account upvotes etc?
     # TODO Also boost pivots from the 'origin' subreddit
+    # TODO Take into account subjectivity and concreteness ratings
 
     text = sentence['text']
 
@@ -55,6 +56,7 @@ def get_question_score(sentence: pd.Series):
 
     # TODO Take into account upvotes etc?
     # TODO Also boost questions from the 'origin' subreddit
+    # TODO Take into account subjectivity and concreteness ratings
 
     text = sentence['text']
     tokens = text.split()
@@ -107,6 +109,7 @@ def get_post_score(post: pd.Series):
     # TODO Take into account upvotes etc?
     # TODO Also boost posts from the 'origin' subreddit
     # TODO Aren't the length limits going to cause data sparsity? We might want to cut longer posts up?
+    # TODO Take into account subjectivity and concreteness ratings
 
     if post['type'] == 'submission':
         score = 5
