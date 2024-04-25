@@ -1,3 +1,6 @@
+calculate_scores_cpu.py
+create_triplets.py
+
 Training the QA model is done using:
 https://github.com/google-research/albert
 
