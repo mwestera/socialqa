@@ -29,6 +29,9 @@ $ cat collected/posts.jsonl > python clean_posts.py --autocorrect hunspell --htm
 
 """
 
+# TODO: clean_posts: veld 'text' toevoegen als vervanging voor selftext/body, wat in het geval van submissions ook de titel bevat.
+#    dat betekent dat extract_sentences gewoon van 'text' gebruik kan maken, en geen uitzonderingspositie geeft aan de titel.
+
 PUNCTUATION_PROPORTION_THRESHOLD = .1   # removes lines with more punctuation than this
 
 @click.command(help="Extract sentences from posts and their context. Prints each sentence as a json dictionary, storing "
@@ -146,14 +149,17 @@ def clean(text: str, spellchecker=None, html=None) -> str:
     """
     text = text
     text = text.replace('[removed]', '')
+    text = text.replace('[deleted]', '')
     text = emoji.replace_emoji(text, '')
     text = text.translate(punctuation_translation)
     text = md_url_regex.sub(r'\1', text)
     text = empty_md_url_regex.sub(r'<URL>', text)
     text = plain_url_regex.sub(r'<URL>', text)
     text = '\n'.join(line for line in text.split('\n') if line and proportion_punctuation(line) < PUNCTUATION_PROPORTION_THRESHOLD)
-    if not text.strip():
+    if not (text := text.strip()):
         return text
+    # TODO Maybe remove lines starting with |
+    # TODO: remove things with too high proportion non-ascii (e.g., chinese).
     if spellchecker:
         text2 = spellchecker(text)
         if text != text2 and html:
