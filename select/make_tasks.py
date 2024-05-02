@@ -14,10 +14,11 @@ from matplotlib.backends.backend_pdf import PdfPages
 import termplotlib
 import logging
 import tqdm
+import re
 
 from typing import List, Tuple
 
-from scoring_methods import get_post_score, get_question_score, get_pivot_score, filter_QA_pair, rank_QA_pair, filter_RTE_pair, rank_RTE_pair
+from scoring_methods import get_scalers,get_post_score, calculate_question_score, calculate_pivot_score, filter_QA_pair, rank_QA_pair, filter_RTE_pair, rank_RTE_pair
 
 # TODO: finish implementation of Squad-format output
 
@@ -102,8 +103,8 @@ def main(sentences, posts, n_qa, n_rte, pdf, seed):
                              ranker=rank_RTE_pair)
     logging.info(f'Selected {len(pairs_RTE)} RTE pairs.')
 
-    write_pairs_to_squad_format(pairs_QA, user_posts, outfile_QA)
-    write_pairs_to_rte_format(pairs_RTE, outfile_RTE)
+    write_qa_pairs(pairs_QA, user_posts, outfile_QA)
+    write_ent_pairs(pairs_RTE, outfile_RTE)
 
     report.close()
 
@@ -138,8 +139,9 @@ def add_sentence_scores(all_sentences, scale=False):
     The idea is that only the highest-scoring ones will be used (in the QA and entailment tasks), to save compute.
     """
     logging.info('Computing sentence scores.')
-    all_sentences['pivot_score'] = all_sentences.apply(get_pivot_score, axis=1)
-    all_sentences['question_score'] = all_sentences.apply(get_question_score, axis=1)
+    scaler_votes = get_scalers(all_sentences)
+    all_sentences['pivot_score'] = all_sentences.apply(calculate_pivot_score, scaler_votes, axis=1)
+    all_sentences['question_score'] = all_sentences.apply(calculate_question_score, scaler_votes, axis=1)
 
     if scale:
         all_sentences['pivot_score'] = scale_min_max(all_sentences['pivot_score'])
@@ -330,6 +332,69 @@ def plot_score_distribution(df, score_label, group_by, ax=None, ylim=None):
 #                                               int(len(group)*end)]))
 #     return result
 
+def create_id_text_dict(posts):
+    """
+    Create a dictionary mapping post IDs to their text content.
+
+    Parameters:
+    - posts (DataFrame): The DataFrame containing the posts.
+
+    Returns:
+    - dict: A dictionary mapping post IDs to their text content.
+    """
+    id_text_dict = {}
+    for _, row in posts.iterrows():
+        post_id = row['id']
+        if row['type'] == 'submission':
+            post_id = row['name']
+            title = row.get("title", "")
+            selftext = row.get("selftext", "")
+            id_text_dict[post_id] = {
+                'text': title + " "+ selftext,
+                'start_end': len(title)+1
+            }
+        elif row['type'] == 'comment':
+            post_id = row['id']
+            body = row.get("body", "")
+            id_text_dict[post_id] = {
+                'text': body,
+                'start_end': 0
+            }
+
+        submission = row['submission']
+        if pd.notnull(submission):
+            post_id = submission.get("name")
+            title = submission.get("title", "")
+            id_text_dict[post_id] = {
+                'text': title + " " + submission.get("selftext"),
+                'start_end': len(title)+1
+            }
+
+        parent = row['parent']
+        if pd.notnull(parent):
+            post_id = parent.get("id")
+            if parent.get("type") == "submission":
+                id_text_dict[post_id] = {
+                    'text': parent.get("selftext"),
+                    'start_end': 0
+                }
+            elif parent.get("type") == "comment":
+                id_text_dict[post_id] = {
+                    'text': parent.get("body"),
+                    'start_end': 0
+                }
+
+        replies = row['replies']
+        if pd.notnull(replies).any():
+            for reply in replies:
+                post_id=reply.get("id")
+                id_text_dict[post_id] = {
+                    'text': reply.get("body"),
+                    'start_end': 0
+                }
+                
+    
+    return id_text_dict
 
 def scale_min_max(series: pd.Series):
     """
@@ -338,111 +403,112 @@ def scale_min_max(series: pd.Series):
     seriesmin = series.min()
     return (series - seriesmin) / (series.max() - seriesmin)
 
-
-def write_pairs_to_rte_format(pairs, outfile):
-    """
-    RTE format:
-    index sentence1 sentence2 label
-    0 No Weapons of Mass Destruction Found in Iraq Yet. Weapons of Mass Destruction Found in Iraq. not_entailment
-    1 A place of sorrow, after Pope John Paul II died, became a place of celebration, as Roman Catholic faithful gathered in downtown Chicago to mark the installation of new Pope Benedict XVI. Pope Benedict XVI is the new leader of the Roman Catholic Church. entailment
-    2 Herceptin was already approved to treat the sickest breast cancer patients, and the company said, Monday, it will discuss with federal regulators the possibility of prescribing the drug for more breast cancer patients. Herceptin can be used to treat breast cancer. entailment
-    3 Judie Vivian, chief executive at ProMedica, a medical service company that helps sustain the 2-year-old Vietnam Heart Institute in Ho Chi Minh City (formerly Saigon), said that so far about 1,500 children have received treatment. The previous name of Ho Chi Minh City was Saigon. entailment
-    4 A man is due in court later charged with the murder 26 years ago of a teenager whose case was the first to be featured on BBC One's Crimewatch. Colette Aram, 16, was walking to her boyfriend's house in Keyworth, Nottinghamshire, on 30 October 1983 when she disappeared. Her body was later found in a field close to her home. Paul Stewart Hutchinson, 50, has been charged with murder and is due before Nottingham magistrates later. Paul Stewart Hutchinson is accused of having stabbed a girl. not_entailment
-    """
-    logging.info(f'Writing {len(pairs)} pairs to {outfile} in RTE format.')
-
+def write_pairs_to_list(pairs, outfile):
     with open(outfile, 'w') as file:
         tsv_writer = csv.writer(file, delimiter='\t')
         tsv_writer.writerow(['index', 'sentence1', 'sentence2'])
         for n, (pivot, post) in enumerate(pairs):
             tsv_writer.writerow([n, post.text, pivot.text])
 
-
-
-def write_pairs_to_squad_format(pairs, posts, outfile):
+def write_ent_pairs(pairs, outfile):
     """
-    Example of format SQuAD v2:
+    Writes entailment pairs of sentences to a file in tsv format.
 
-    {"version": "v2.0",
-     "data": [{"title": "Normans", "paragraphs": [
+    Args:
+        pairs (list): List of tuples containing pivot and post sentences.
+        outfile (str): Path to the output file.
 
-    {"qas": [
-
-    {"question": "In what country is Normandy
-    located?", "id": "56ddde6b9a695914005b9628", "answers": [{"text": "France", "answer_start": 159}, {"text": "France",
-    "answer_start": 159}, {"text": "France", "answer_start": 159}, {"text": "France", "answer_start": 159}],
-    "is_impossible": false},
-
-    {"question": "When were the Normans in Normandy?", "id": "56ddde6b9a695914005b9629",
-    "answers": [{"text": "10th and 11th centuries", "answer_start": 94}, {"text": "in the 10th and 11th centuries",
-    "answer_start": 87}, {"text": "10th and 11th centuries", "answer_start": 94}, {"text": "10th and 11th centuries",
-    "answer_start": 94}], "is_impossible": false},
-
-    {"question": "From which countries did the Norse originate?",
-    "id": "56ddde6b9a695914005b962a", "answers": [{"text": "Denmark, Iceland and Norway", "answer_start": 256},
-    {"text": "Denmark, Iceland and Norway", "answer_start": 256}, {"text": "Denmark, Iceland and Norway", "answer_start":
-    256}, {"text": "Denmark, Iceland and Norway", "answer_start": 256}], "is_impossible": false}, {"question": "Who was
-    the Norse leader?", "id": "56ddde6b9a695914005b962b", "answers": [{"text": "Rollo", "answer_start": 308},
-    {"text": "Rollo", "answer_start": 308}, {"text": "Rollo", "answer_start": 308}, {"text": "Rollo", "answer_start":
-    308}], "is_impossible": false},
-
-    {"question": "What century did the Normans first gain their separate identity?",
-    "id": "56ddde6b9a695914005b962c", "answers": [{"text": "10th century", "answer_start": 671}, {"text": "the first half
-    of the 10th century", "answer_start": 649}, {"text": "10th", "answer_start": 671}, {"text": "10th", "answer_start":
-    671}], "is_impossible": false},
-
-    {"plausible_answers": [{"text": "Normans", "answer_start": 4}], "question": "Who gave
-    their name to Normandy in the 1000's and 1100's", "id": "5ad39d53604f3c001a3fe8d1", "answers": [], "is_impossible":
-    true},
-
-    {"plausible_answers": [{"text": "Normandy", "answer_start": 137}], "question": "What is France a region of?",
-    "id": "5ad39d53604f3c001a3fe8d2", "answers": [], "is_impossible": true},
-
-    ...
-
-    ], "context": "The Normans (Norman: Nourmands; French: Normands; Latin: Normanni) were the people who in the 10th and
-    11th centuries gave their name to Normandy, a region in France. They were descended from Norse (\"Norman\" comes from
-    \"Norseman\") raiders and pirates from Denmark, Iceland and Norway who, under their leader Rollo, agreed to swear
-    fealty to King Charles III of West Francia. Through generations of assimilation and mixing with the native Frankish
-    and Roman-Gaulish populations, their descendants would gradually merge with the Carolingian-based cultures of West
-    Francia. The distinct cultural and ethnic identity of the Normans emerged initially in the first half of the 10th
-    century, and it continued to evolve over the succeeding centuries."}
+    Returns:
+        None
     """
+    logging.info(f'Writing {len(pairs)} pairs to {outfile} in RTE format.')
+    with open(outfile, 'w') as file:
+        tsv_writer = csv.writer(file, delimiter='\t')
+        tsv_writer.writerow(['index','pivot_id','sentence1', 'sentence2'])
+        def replace_last_punctuation(text):
+            return re.sub(r'([.?!])[^.?!]*$', ',', text)
+        
+        for n, (pivot, post) in enumerate(pairs):
+            new_post = post.text
+            new_pivot = pivot.text
+            pivot_id = pivot.snippet_id
+            # Handle previous context for post, if available
+            if hasattr(post, 'previous') and post.previous is not None:
+                prev_post= replace_last_punctuation(post.previous)
+                new_post = prev_post + " " +new_post
 
-    logging.warning("Writing QA file not yet fully implemented.")
-    return
-
-    # logging.info(f'Writing {len(pairs)} pairs to {outfile} in SQUADv2 format.')
-
-    data = []
-    result = {"version": f"v0.1.{random.seed()}",
-              "data": data}
-
-    items = []
-    for n, (question, pivot) in enumerate(pairs):
-        # TODO Decide which metadata to save for our analysis, and which for Squad.
-        item_info = {'question_id': question['id'],
-         'question_text': question['text'],
-         'pivot_id': pivot['id'],
-         'pivot_text': pivot['text'],
-         'user_post_id': pivot['user_post_id'],
-         }
-        items.append(item_info)
-
-    items_df = pd.DataFrame(items)
-    for user_post_id, sub_df in items_df.groupby('user_post_id'):
-        # TODO: look up the post data.
-        pass
-        for item in sub_df.itertuples():
-            # TODO: add each item to a squad unit
-            pass
-        # TODO: Write a finished squad unit
-        pass
+            # Handle previous context for pivot, if available
+            if hasattr(pivot, 'previous') and pivot.previous is not None:
+                prev_pivot = replace_last_punctuation(pivot.previous)
+                new_pivot = prev_pivot + " " +new_pivot
+            new_pivot = new_pivot.replace('\t', ' ')  # Replace tabs with spaces
+            new_post = new_post.replace('\t', ' ')  # Replace tabs with spaces
+            new_pivot = re.sub(r'\s+', ' ', new_pivot)  # Replace multiple spaces with a single space
+            new_post = re.sub(r'\s+', ' ', new_post)  # Replace multiple spaces with a single space
+            tsv_writer.writerow([n, pivot_id,new_pivot, new_post])
 
 
+def write_qa_pairs(pairs, posts, outfile):
+    """
+    Write question-answer pairs to a file in tsv format.
 
+    Args:
+        pairs (list): List of tuples containing question and pivot objects.
+        posts (list): List of post objects.
+        outfile (str): Path to the output file.
 
+    Returns:
+        None
+    """
+    logging.info("Creating ID to text dictionary.")
+    id_text_dict = create_id_text_dict(posts)  # Create the ID to text dictionary
 
+    logging.info(f'Writing {len(pairs)} pairs to {outfile} in tsv format.')
+    with open(outfile, 'w', newline='') as file:
+        tsv_writer = csv.writer(file, delimiter='\t')
+        tsv_writer.writerow(['index','pivot_id','question', 'post', 'pivot_positions'])
+        
+        # Function to replace the last punctuation mark in a sentence with a comma
+        def replace_last_punctuation(text):
+            return re.sub(r'([.?!])[^.?!]*$', ',', text)
+
+        pair_positions = {}
+        pair_pivots_ids={}
+        for (question, pivot) in pairs:
+            new_question = question.text
+            post_id = pivot.post_id
+            pivot_id = pivot.snippet_id
+            post = id_text_dict.get(post_id)['text']  # Get the text from the ID using the dictionary
+
+            # Handle previous context for question, if available
+            if hasattr(question, 'previous') and question.previous is not None:
+                prev_question = replace_last_punctuation(question.previous)
+                new_question = prev_question + ". " + new_question
+
+            # Handle previous context for post, if available
+            #new_question =new_question.replace('\t', ' ')  # Replace tabs with spaces
+            #new_question = re.sub(r'\s+', ' ', new_question)  # Replace multiple spaces with a single space
+            #new_post = post.replace('\t', ' ')  # Replace tabs with spaces
+            #new_post = re.sub(r'\s+', ' ', new_post)  # Replace multiple spaces with a single space
+
+            #pivot_text = pivot.text.replace('\t', ' ')  # Replace tabs with spaces
+            #pivot_text = re.sub(r'\s+', ' ', pivot_text) 
+
+            new_start= new_post.find(pivot.text)
+            new_end = new_start + len(pivot.text)
+
+            pair_key = (new_question, post_id)
+            pair_post = (new_question,new_post)
+
+            # Add the pivot positions to the dictionary
+            if pair_key in pair_positions:
+                pair_positions[pair_post].append((new_start, new_end))
+            else:
+                pair_positions[pair_post] = [(new_start, new_end)]
+                pair_pivots_ids[pair_post] = pivot_id
+
+        for index, ((new_question, new_post), positions) in enumerate(pair_positions.items()):
+            tsv_writer.writerow([index, pair_pivots_ids[(new_question, new_post)], new_question, new_post, positions])
 
 if __name__ == '__main__':
     main()
