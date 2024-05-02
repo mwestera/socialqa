@@ -38,6 +38,9 @@ $ python extract_sentences.py collected/posts_conspiracy_top_anon.jsonl > collec
 
 """
 
+# TODO: filter on minimum sentence length    5 < len < 50
+
+
 @click.command(help="Extract sentences from posts and their context. Prints each sentence as a json dictionary, storing "
                     "the text along with various meta-info.")
 @click.argument("file", type=click.File('r'), default=sys.stdin)
