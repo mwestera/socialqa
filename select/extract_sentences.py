@@ -53,6 +53,7 @@ def main(file, use_spacy):
 
     n_sentences = 0
     n_post = 0
+
     for n_post, line in enumerate(file):
         item = json.loads(line)
         for sentence in extract_sentences_from_post(item, nlp):

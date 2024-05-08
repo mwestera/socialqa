@@ -1,4 +1,5 @@
 from sentence_transformers import SentenceTransformer
+from transformers import pipeline
 
 import logging
 import sys
@@ -16,7 +17,7 @@ $ cat collected/sentences_conspiracy.jsonl | python embed_sentences.py > collect
 """
 
 
-@click.command(help="Add information to sentences.jsonl, namely subjectivity and abstractness.")
+@click.command(help="Compute embeddings for sentences jsonl, outputting them in .csv format.")
 @click.argument("sentences", type=click.File('r'), default=sys.stdin)
 def main(sentences):
 
@@ -25,20 +26,18 @@ def main(sentences):
     # 384 dimensional; there seems to be no lower-dim model: https://www.sbert.net/docs/pretrained_models.html
     model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
 
-    ids = []
-    texts = []
-
-    for n, line in enumerate(sentences):
-        sentence = json.loads(line)
-        id, text = sentence['id'], sentence['text']
-        texts.append(text)
-        ids.append(id)
-
     writer = csv.writer(sys.stdout)
 
-    for id, emb in zip(ids, model.encode(texts, show_progress_bar=True)):
-        writer.writerow([id, *emb])
+    n = 0
 
+    for line in sentences:
+        sentence = json.loads(line)
+        id, text = sentence['id'], sentence['text']
+        emb = model.encode(text, show_progress_bar=False)
+        writer.writerow([id, *emb])
+        n += 1
+
+    logging.info(f'Computed {n} embeddings.')
 
 
 if __name__ == '__main__':

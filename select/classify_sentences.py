@@ -8,7 +8,7 @@ import json
 import csv
 import re
 
-from importlib.resources import open_text
+from importlib import resources
 
 
 """
@@ -31,14 +31,14 @@ def main(sentences):
     classify_subjectivity = make_subjectivity_classifier()
     classify_concreteness = make_concreteness_classifier()
 
-    try:
-        for n, line in enumerate(sentences):
-            sentence = json.loads(line)
-            sentence['subjectivity'] = classify_subjectivity(sentence['text'])
-            sentence['concreteness'] = classify_concreteness(sentence['text'])
-            print(json.dumps(sentence))
-    except KeyboardInterrupt:
-        logging.info('Keyboard interrupt!')
+    n = 0
+
+    for line in sentences:
+        sentence = json.loads(line)
+        sentence['subjectivity'] = classify_subjectivity(sentence['text'])
+        sentence['concreteness'] = classify_concreteness(sentence['text'])
+        print(json.dumps(sentence))
+        n += 1
 
     logging.info(f'Computed scores for {n} sentences.')
 
@@ -58,7 +58,7 @@ def make_subjectivity_classifier():
 
 def make_concreteness_classifier():
     concreteness_ratings = {}
-    with open_text('auxiliary', 'Concreteness_ratings_Brysbaert_et_al_BRM.tsv') as file:
+    with resources.files('auxiliary').joinpath('Concreteness_ratings_Brysbaert_et_al_BRM.tsv').open('r') as file:
         reader = csv.reader(file, delimiter="\t")
         next(reader)    # skip columns
         for row in reader:
