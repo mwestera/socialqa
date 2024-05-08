@@ -7,11 +7,7 @@ import string
 
 import tqdm
 
-import hunspell
-import neuspell  # hmm, remember to manually install torch==1.13.1, transformers==4.30.2
 import emoji
-
-import sacremoses
 
 import difflib
 htmldiff = difflib.HtmlDiff(wrapcolumn=80)
@@ -59,7 +55,7 @@ def main(posts, autocorrect, html):
         autocorrector = None
 
     try:
-        for n_post, line in tqdm.tqdm(enumerate(posts)):
+        for n_post, line in tqdm.tqdm(enumerate(posts), file=sys.stderr):
             post_entry = json.loads(line)
             clean_post_entry(post_entry, autocorrector, html=html)
             print(json.dumps(post_entry))
@@ -70,7 +66,7 @@ def main(posts, autocorrect, html):
     if html and autocorrect:
         with open(html, 'a') as file:
             file.write('\n\n</body></html>')
-            logging.info(f'Html vizualisation of spellchecker written to {html}')
+            logging.info(f'Html visualisation of spellchecker written to {html}')
 
     logging.info(f'Cleaned {n_post} post entries (inc. family).')
 
@@ -80,6 +76,9 @@ def neuspell_autocorrect():
     Returns a function that takes a string and uses the Neuspell spellchecker
     and moses detokenizer for autocorrection.
     """
+    import neuspell  # hmm, remember to manually install torch==1.13.1, transformers==4.30.2
+    import sacremoses
+
     spellchecker = neuspell.BertChecker()
     spellchecker.from_pretrained()
     detokenizer = sacremoses.MosesDetokenizer('en').detokenize
@@ -96,6 +95,8 @@ def hunspell_autocorrect():
     """
     Returns a function that takes a string and uses the Hunspell spellchecker for autocorrection.
     """
+    import hunspell
+
     spellchecker = hunspell.HunSpell('/usr/share/hunspell/en_US.dic', '/usr/share/hunspell/en_US.aff')
     words_to_add = ['cybertruck',
                     'cybertrucks',
