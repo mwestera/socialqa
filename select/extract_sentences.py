@@ -8,7 +8,7 @@ import logging
 import termplotlib
 import numpy as np
 import itertools
-
+import tqdm
 """
 Extract sentences from posts and their context (submission, parents, replies), using either the spacy 
 tokenizer (slow!) or regex (fast!). 
@@ -38,29 +38,36 @@ $ python extract_sentences.py collected/posts_conspiracy_top_anon.jsonl > collec
 
 """
 
-# TODO: filter on minimum sentence length    5 < len < 50
-
-
 @click.command(help="Extract sentences from posts and their context. Prints each sentence as a json dictionary, storing "
                     "the text along with various meta-info.")
 @click.argument("file", type=click.File('r'), default=sys.stdin)
+@click.argument("output", type=click.Path(), required=True, default='sentences.jsonl')
 @click.option("--use_spacy", help="Whether to use Spacy (slow); if not, uses simple regex (super fast).", type=bool, required=False, is_flag=True)
-def main(file, use_spacy):
+
+def main(file, output,  use_spacy):
+    n_valid_sentences = 0
 
     logging.basicConfig(level=logging.INFO)
 
     nlp = spacy.load('en_core_web_sm') if use_spacy else None
+    
+    with open(output, 'w') as output_file:
+        output_file.write('')
 
     n_sentences = 0
     n_post = 0
-
-    for n_post, line in enumerate(file):
+    for n_post, line in tqdm.tqdm(enumerate(file)):
         item = json.loads(line)
         for sentence in extract_sentences_from_post(item, nlp):
             n_sentences += 1
-            print(json.dumps(sentence))
+            if 5 <= sentence['num_tokens'] <= 50:  # Check if sentence has valid number of tokens
+                n_valid_sentences += 1
+                with open(output, 'a') as file:
+                    file.write(json.dumps(sentence) + '\n')
 
     logging.info(f'Extracted {n_sentences} sentences from {n_post} posts.')
+    percentage = (n_valid_sentences / n_sentences) * 100  # Calculate the percentage
+    logging.info(f'Total percentage of sentences between 5 and 50 tokens: {percentage:.2f}%')
 
     # TODO: This might be a good place to log some sentence-level stats like sentence length and num questions?
 
@@ -75,6 +82,9 @@ def extract_sentences_from_post(user_post: dict, nlp: Optional[spacy.Language] =
         'subreddit_name': user_post['subreddit_name'],
         'user_post_created': user_post['created'],
     }
+
+    total_sentences = 1
+    extracted_sentences = 1
 
     for snippet in iter_context_snippets(user_post):
         snippet_info_to_save = {
@@ -93,16 +103,21 @@ def extract_sentences_from_post(user_post: dict, nlp: Optional[spacy.Language] =
             sentences = [(s.group(), s.span()) for s in sentence_regex.finditer(snippet['text'])]
         sentences = [(None, None), *sentences, (None, None)]
         for (previous, _), (text, (start, end)), (next, _) in zip(sentences, sentences[1:], sentences[2:]):
+            num_tokens = len(text.split())
             yield {
                 'id': f'{snippet["id"]}_{start}-{end}',
                 'start': start,
                 'end': end,
+                'num_tokens': num_tokens,
                 'text': text,
                 'previous': previous,
                 'next': next,
                 **snippet_info_to_save,
                 **post_info_to_save,
             }
+    
+
+
 
 def iter_context_snippets(user_post: dict) -> Iterator[dict]:
     """
