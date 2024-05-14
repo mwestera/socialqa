@@ -1,0 +1,35 @@
+{
+    "question": {
+        "origin_weight": 0,
+        "vote_weight": 0,
+        "length_weight": 0,
+        "subjectivity_weight": 1,
+        "concreteness_weight": 0.2
+    },
+    "pivot": {
+        "origin_weight": 0,
+        "vote_weight": 0,
+        "length_weight": 0,
+        "subjectivity_weight": 1,
+        "concreteness_weight": 0.2
+    },
+    "post": {
+        "type_weight": 0,
+        "length_weight": 0,
+        "vote_weight": 0,
+        "subjectivity_weight": 1,
+        "concreteness_weight": 0.2
+    },
+    "qa_pairs": {
+        "subreddit_weight": 1,
+        "embeddings_weight": 1,
+        "time_weight": 0,
+        "iou_weight":1
+    },
+    "ent_pairs": {
+        "subreddit_weight": 1,
+        "embeddings_weight": 1,
+        "time_weight": 0,
+        "iou_weight":1
+    }
+}
