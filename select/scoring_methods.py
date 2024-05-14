@@ -2,6 +2,10 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
+import json
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+import pandas as pd
 """
 {"id": "g8yledd_2136-2181", "start": 2136, "end": 2181, "text": "There was baggies of trail mix, still sealed.",
  "previous": "Bears don't have that much dexterity.", "next": "The mess was *very* human.", "num_comments": null, 
@@ -12,102 +16,93 @@ from sklearn.preprocessing import MinMaxScaler
  "user_post_created": "2020-10-17 16:41:59",
  "subjectivity": 0.937221884727478, "concreteness": 2.585}
 """
-def sensitivity_parameters():
-    return {
-        # TODO: find double counted features, such as submission have more votes and larger length
-        'question': {
-            # Weights for the different features, sentences
-            'origin_weight': 1,
-            'vote_weight': 1,
-            'length_weight': 1,
-            'subjectivity_weight': 1,
-            'concreteness_weight': 0.2,
-        },
-        'pivot': {
-            'origin_weight': 1,
-            'vote_weight': 1,
-            'length_weight': 1,
-            'subjectivity_weight': 1,
-            'concreteness_weight': 0.2,
-        },
-        # Weights for the different features, posts
-        'post': {
-            'type_weight': 1,
-            'length_weight': 1,
-            'vote_weight': 1,
-            'subjectivity_weight': 1,
-            'concreteness_weight': 0.2,
-        },
-        # Weights for the different features, pairs
-        'qa_pairs': {
-            'subreddit_weight': 1,
-            'iou_weight': 1,
-            'time_weight': 1,
-        },
-        'ent_pairs':{
-            'subreddit_weight': 1,
-            'iou_weight': 1,
-            'time_weight': 1,
-        }
-    }
+def get_embeddings_file():
+    with open('config.json', 'r') as config_file:
+        config = json.load(config_file)
+        embeddings_file = config['dir'] + "/embeddings.csv"
+    return embeddings_file
+
+def get_weights():
+    with open('weights.json', 'r') as file:
+        weights = json.load(file)
+    return weights
 
 def calculate_question_score(sentence: pd.Series, scaler_votes: MinMaxScaler):
-    weights = sensitivity_parameters()['question']
-
+    """
+    Calculate the score of a question sentence.
+    """
+    weights = get_weights()['question']
+    vote_score = get_vote_score(sentence)
+    vote_score_df = pd.DataFrame([vote_score], columns=['total_votes'])
+    #vote_score = np.array(vote_score).reshape(-1, 1)  # Reshape data to fit scaler
+    scaled_vote_score = scaler_votes.transform(vote_score_df)[0][0]
     score = 0
     text = sentence['text']
     if not text.endswith('?'):
         return None
     score += weights['origin_weight'] * get_origin_score(sentence)
-    score += weights['vote_weight'] * scaler_votes(get_vote_score(sentence))
+    score += weights['vote_weight'] * scaled_vote_score
     score += weights['length_weight'] * get_length_score(sentence,mean_length = 55,std_dev = 15)  # The standard deviation of the Gaussian function)
     score -= weights['subjectivity_weight'] * sentence['subjectivity']
     score += weights['concreteness_weight'] * sentence['concreteness']
     return score
 
 def calculate_pivot_score(sentence: pd.Series,scaler_votes: MinMaxScaler):
-    weights = sensitivity_parameters()['pivot']
-
+    """
+    Calculate the score of a pivot sentence.
+    """
+    weights = get_weights()['pivot']
+    vote_score = get_vote_score(sentence)
+    vote_score_df = pd.DataFrame([vote_score], columns=['total_votes'])
+    #vote_score = np.array(vote_score).reshape(-1, 1)  # Reshape data to fit scaler
+    scaled_vote_score = scaler_votes.transform(vote_score_df)[0][0]
     score = 0
     text = sentence['text']
     if text.endswith('?') or sentence['from_user']:
         return None
     score += weights['origin_weight'] * get_origin_score(sentence)
-    score += weights['subreddit_weight'] * get_origin_score(sentence)
-    score += weights['vote_weight'] * scaler_votes(get_vote_score(sentence))
+    score += weights['vote_weight'] * scaled_vote_score
     score += weights['length_weight'] * get_length_score(sentence,mean_length = 55,std_dev = 15)
     score -= weights['subjectivity_weight'] * sentence['subjectivity']
     score += weights['concreteness_weight'] * sentence['concreteness']
     return score
 
-def calculate_post_score(post: pd.Series):
+def calculate_post_score(post: pd.Series, scaler_votes: MinMaxScaler):
 
     # TODO Take into account upvotes etc? / 
     # TODO Also boost posts from the 'origin' subreddit / Done, do this in pairs
     # TODO Aren't the length limits going to cause data sparsity? We might want to cut longer posts up? 
     # / Done, no we take top pairs so we do not remove any pairs, just reorder them
     # TODO Take into account subjectivity and concreteness ratings/ Done
+    """
+    Calculate the score of a post.
+    """
+    vote_score = get_vote_score(post)
+    vote_score_df = pd.DataFrame([vote_score], columns=['total_votes'])
+    #vote_score = np.array(vote_score).reshape(-1, 1)  # Reshape data to fit scaler
+    scaled_vote_score = scaler_votes.transform(vote_score_df)[0][0]
     score = 0
-    weights = sensitivity_parameters()['post']
+    weights = get_weights()['post']
     score += weights['type_weight'] * (1 if post['type'] == 'submission' else 0)
-    score += weights['vote_weight'] * get_vote_score(post)
+    score += weights['vote_weight'] * scaled_vote_score
     score += weights['length_weight'] * get_length_score(post, mean_length=600, std_dev=150)
-    score -= weights['subjectivity_weight'] * post['subjectivity']
-    score += weights['concreteness_weight'] * post['concreteness']
+    #TODO calculate subjectivity on posts
+    #score -= weights['subjectivity_weight'] * post['subjectivity']
+    #score += weights['concreteness_weight'] * post['concreteness']
     return score
 
-def calculate_qa_scores(question: dict, pivot: dict, asym: bool = False) -> float:
+def calculate_qa_scores(question: pd.Series, pivot: pd.Series, asym: bool = False) -> float:
     """
     How semantically similar or textually related are the two strings?
     Currently computes intersection-over-union.
     If text1 is much shorter than text2, asym=True might be best.
     """
-    weights= sensitivity_parameters()['qa_pairs']
+    weights= get_weights()['qa_pairs']
     # Same Subreddit
     score = 0
     score += weights['subreddit_weight'] * get_subreddit_score(question, pivot)
-    score += weights['iou_weight'] * get_iou_score(question, pivot, asym)
-    score += weights['time_weight'] * get_time_score(question, pivot)
+    score += weights['embeddings_weight'] * get_cosine_similarity(question, pivot)
+    #score += weights['time_weight'] * get_time_score(question, pivot)
     return score
 def calculate_ent_scores(pivot: dict, entailment: dict, asym: bool = False) -> float:
     """
@@ -115,12 +110,12 @@ def calculate_ent_scores(pivot: dict, entailment: dict, asym: bool = False) -> f
     Currently computes intersection-over-union.
     If text1 is much shorter than text2, asym=True might be best.
     """
-    weights= sensitivity_parameters()['ent_pairs']
+    weights= get_weights()['ent_pairs']
     # Same Subreddit
     score = 0
     score += weights['subreddit_weight'] * get_subreddit_score(pivot, entailment)
-    score += weights['iou_weight'] * get_iou_score(pivot, entailment, asym)
-    score += weights['time_weight'] * get_time_score(pivot, entailment)
+    score += weights['embeddings_weight'] * get_cosine_similarity(pivot, entailment)
+    #score += weights['time_weight'] * get_time_score(pivot, entailment)
     return score
 
 def get_time_score(post1, post2):
@@ -136,23 +131,63 @@ def get_time_score(post1, post2):
     score += time_diff_score
     return time_diff_score
 
-def get_iou_score(post1,post2, asym):
-    text1 = post1['text']
-    text2 = post2['text']
+def get_embedding(post_id):
+    embeddings_file = get_embeddings_file()
+    embeddings_df = pd.read_csv(embeddings_file)
+    first_column_name = embeddings_df.columns[0]  # Get the name of the first column
+    embedding_columns = embeddings_df.columns[1:]
 
-    # IOU
-    a = set(text1.split())
-    b = set(text2.split())
-    iou = len(a & b) / len(a if asym else (a | b))
-    score = iou
-    return score
+    # Combine all embedding columns into a single one
+    embeddings_df['embedding'] = embeddings_df[embedding_columns].values.tolist()
+    embedding = embeddings_df.loc[embeddings_df[first_column_name] == post_id, 'embedding'].values[0]
+    return embedding
+
+
+def get_cosine_similarity(post1, post2):
+    """
+    Calculate the cosine similarity between two embeddings.
+    
+    Args:
+    - post1 (np.ndarray): The first embedding.
+    - post2 (np.ndarray): The second embedding.
+    
+    Returns:
+    - float: The cosine similarity between the two embeddings.
+    """
+    post1_id = post1[1]
+    post2_id = post2[1]
+    
+    # Assuming get_embedding() returns embeddings as NumPy arrays
+    embedding1 = tf.constant(get_embedding(post1_id), dtype=tf.float32)
+    embedding2 = tf.constant(get_embedding(post2_id), dtype=tf.float32)
+    
+    # Compute cosine similarity
+    similarity = tf.reduce_sum(embedding1[:, tf.newaxis] * embedding2, axis=-1)
+    similarity /= tf.norm(embedding1[:, tf.newaxis], axis=-1) * tf.norm(embedding2, axis=-1)
+    
+    # Extract the similarity value
+    similarity = similarity.numpy()[0]  # Convert to NumPy array and extract the value
+    
+    return similarity
 
 def get_subreddit_score(post1,post2):
-    subreddit_score = 1 if post1['subreddit_name'] == post2['subreddit_name'] else 0
-    score += subreddit_score
+    """
+    Calculate the subreddit score, if same then 1.
+    """
+
+    subreddit_score = 1 if post1[18] == post2[18] else 0
+    return subreddit_score
+
 def get_scalers(all_sentences):
-    scaler = MinMaxScaler(0,1)
-    scaled_data = all_sentences["votes"].apply(get_number_of_votes).to_frame()
+    """
+    Get the MinMaxScaler objects for the number of votes.
+    """
+    scaler = MinMaxScaler(feature_range=(0,1))
+    # Apply the function to the dataframe
+    all_sentences['upvotes'] = all_sentences.apply(lambda row: get_number_of_votes(row['score'], row['upvote_ratio'])[0], axis=1)
+    all_sentences['down_votes'] = all_sentences.apply(lambda row: get_number_of_votes(row['score'], row['upvote_ratio'])[1], axis=1)
+    all_sentences['total_votes'] = all_sentences['upvotes'] + all_sentences['down_votes']  # Create new feature
+    scaled_data = all_sentences[['total_votes']]  # Use new feature for scaling
     scaler.fit(scaled_data)
     return scaler
 
@@ -168,6 +203,8 @@ def get_number_of_votes(score, upvote_ratio):
     - tuple: A tuple containing the number of upvotes and downvotes (upvotes, downvotes).
              Returns (None, None) if it's impossible to determine absolute values.
     """
+    if score is None or upvote_ratio is None or np.isnan(score) or np.isnan(upvote_ratio):
+        return (0,0)
     if upvote_ratio == 1:  # All votes are upvotes
         upvotes = score
         downvotes = 0
@@ -175,7 +212,7 @@ def get_number_of_votes(score, upvote_ratio):
         upvotes = 0
         downvotes = 0
     elif upvote_ratio == 0.5:  # Equal number of upvotes and downvotes, but exact numbers are indeterminate
-        return None, None  # Cannot determine absolute values from score and upvote_ratio alone
+        return (0,0)  # Cannot determine absolute values from score and upvote_ratio alone
     else:
         # Calculate upvotes using the derived formula
         upvotes = int(round(score / (2 * upvote_ratio - 1)))
@@ -184,14 +221,13 @@ def get_number_of_votes(score, upvote_ratio):
 
     return (upvotes, downvotes)
 
-
 def get_vote_score(sentence):
-    if sentence['upvote_ratio'] is not None:
-        upvotes, downvotes = get_number_of_votes(sentence['score'], sentence['upvote_ratio'])
-        votes  = upvotes + downvotes
-        score += votes/100
-        return votes
-    return 0
+    if sentence['upvote_ratio'] is None or np.isnan(sentence['upvote_ratio']):
+        return 0
+    
+    upvotes, downvotes = get_number_of_votes(sentence['score'], sentence['upvote_ratio'])
+    votes  = upvotes + downvotes
+    return votes
 
 def get_length_score(sentence, mean_length=55, std_dev=15):
     text = sentence['text']
@@ -208,7 +244,6 @@ def get_length_score(sentence, mean_length=55, std_dev=15):
     
     return score
 
-
 def get_origin_score(sentence):
     sentence_from = sentence['from']
     if sentence_from in ['root_submission_title']:
@@ -221,7 +256,6 @@ def get_origin_score(sentence):
         score = 0
     return score
 
-
 def filter_QA_pair(pair: tuple) -> bool:
     """
     Boolean indicating whether we should keep this pair.
@@ -229,7 +263,6 @@ def filter_QA_pair(pair: tuple) -> bool:
     """
     question, pivot = pair
     return question.user_post_created < pivot.user_post_created
-
 
 def rank_QA_pair(pair: tuple) -> float:
     """
@@ -240,7 +273,6 @@ def rank_QA_pair(pair: tuple) -> float:
     relatedness = calculate_qa_scores(question, pivot)
     return question.question_score * pivot.pivot_score * relatedness
 
-
 def filter_RTE_pair(pair: tuple) -> float:
     """
     Boolean indicating whether we should keep this pair.
@@ -248,7 +280,6 @@ def filter_RTE_pair(pair: tuple) -> float:
     """
     pivot, post = pair
     return pivot.user_post_created < post.created
-
 
 def rank_RTE_pair(pair) -> float:
     """
