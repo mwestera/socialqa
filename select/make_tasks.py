@@ -3,7 +3,7 @@ import click
 import random
 import itertools
 import csv
-
+import time
 import pandas as pd
 import numpy as np
 
@@ -15,10 +15,10 @@ import termplotlib
 import logging
 import tqdm
 import re
-
+import json
 from typing import List, Tuple
 
-from scoring_methods import get_scalers,get_post_score, calculate_question_score, calculate_pivot_score, filter_QA_pair, rank_QA_pair, filter_RTE_pair, rank_RTE_pair
+from scoring_methods import get_scalers,calculate_post_score, calculate_question_score, calculate_pivot_score, filter_QA_pair, rank_QA_pair, filter_RTE_pair, rank_RTE_pair
 
 # TODO: finish implementation of Squad-format output
 
@@ -51,8 +51,8 @@ def main(sentences, posts, n_qa, n_rte, pdf, seed):
     pivots_frac = .05       # TODO: Make these cmd line args? Or config file?
     posts_frac = .5
 
-    outfile_QA = 'temp12345_qa.jsonl'   # TODO: Make these cmd line args?
-    outfile_RTE = 'temp12345_rte.tsv'
+    outfile_QA = f'{sentences}_pairs_qa.tsv'   # TODO: Make these cmd line args?
+    outfile_RTE = f'{sentences}_pairs_rte.tsv'
 
     report = PdfPages(pdf) if pdf else None
 
@@ -60,13 +60,19 @@ def main(sentences, posts, n_qa, n_rte, pdf, seed):
     all_user_posts = read_posts(posts)
 
     add_sentence_scores(all_sentences)
+
+
     add_post_scores(all_user_posts)
 
-    report_score_percentiles(all_user_posts, all_sentences, report)
+    #report_score_percentiles(all_user_posts, all_sentences, report)
 
     questions = all_sentences.dropna(subset=['question_score'])
     pivots = all_sentences.dropna(subset=['pivot_score'])
     user_posts = all_user_posts.dropna(subset=['post_score'])
+
+    write_to_html(questions, 'question_score', 'text')
+    write_to_html(pivots, 'pivot_score', 'text')
+    write_to_html(user_posts, 'post_score', 'text')
 
     # Pre-filter by time? Not super useful.
     # potential_pivots = extract_sorted_subrange_by(potential_pivots, group_by='user_post_author_id', sort_by='user_post_created', between=[.25, .75])
@@ -86,28 +92,109 @@ def main(sentences, posts, n_qa, n_rte, pdf, seed):
     estimate_exhaustive_task_sizes(questions_thresholded, pivots_thresholded, user_posts_thresholded)
 
     logging.info('Composing QA pairs.')
+    start_time = time.time()
     pairs_QA = select_pairs(questions_thresholded,
                             pivots_thresholded,
                             group_by='user_post_author_id',
                             n=n_qa,
                             filter=filter_QA_pair,
                             ranker=rank_QA_pair)
-    logging.info(f'Selected {len(pairs_QA)} QA pairs.')
+    end_time = time.time()
+    logging.info(f'Selected {len(pairs_QA)} QA pairs. Duration: {end_time - start_time} seconds.')
+
+
+    write_to_html_pairs(pairs_QA, QA=True)
 
     logging.info('Composing RTE pairs.')
+    start_time = time.time()
+    print("start QA pairs")
     pairs_RTE = select_pairs(pivots_thresholded,
-                             user_posts_thresholded,
-                             group_by='user_post_author_id',
-                             n=n_rte,
-                             filter=filter_RTE_pair,
-                             ranker=rank_RTE_pair)
-    logging.info(f'Selected {len(pairs_RTE)} RTE pairs.')
+                            user_posts_thresholded,
+                            group_by='user_post_author_id',
+                            n=n_rte,
+                            filter=filter_RTE_pair,
+                            ranker=rank_RTE_pair)
+    end_time = time.time()
+    logging.info(f'Selected {len(pairs_RTE)} RTE pairs. Duration: {end_time - start_time} seconds.')
+
+    write_to_html_pairs(pairs_RTE, QA=False)
 
     write_qa_pairs(pairs_QA, user_posts, outfile_QA)
     write_ent_pairs(pairs_RTE, outfile_RTE)
 
     report.close()
 
+    # Interpolate between red and green
+def interpolate_color(score, min_val, max_val):
+    """
+    Calculate color based on interpolation between red and green.
+    Args:
+    - score: Current value
+    - min_val: Minimum value for scaling
+    - max_val: Maximum value for scaling
+
+    Returns:
+    - A CSS color string.
+    """
+    norm_val = (score - min_val) / (max_val - min_val) if max_val > min_val else 0.5
+    red = int(255 * (1 - norm_val))
+    green = int(255 * norm_val)
+    blue = 0
+    return f"rgb({red},{green},{blue})"
+
+def style_text(score, min_score, max_score):
+    color = interpolate_color(score, min_score, max_score)
+    return f'background-color: {color};'
+
+def write_to_html(posts, score_column, text_column):
+    """
+    Write a styled DataFrame to an HTML file.
+
+    Args:
+        posts (pandas.DataFrame): The DataFrame containing the posts data.
+        score_column (str): The name of the column representing the scores.
+        text_column (str): The name of the column representing the text.
+
+    Returns:
+        None
+    """
+    posts.reset_index(drop=True, inplace=True)
+    posts[score_column] = pd.to_numeric(posts[score_column], errors='coerce')
+
+    min_score = np.nanmin(posts[score_column])
+    max_score = np.nanmax(posts[score_column])
+
+    # Sort by the score column and take the top and bottom 100 entries
+    top_entries = posts.nlargest(100, score_column)
+    bottom_entries = posts.nsmallest(100, score_column)
+    combined_entries = pd.concat([top_entries, bottom_entries])
+    # Reset the index of the DataFrame
+    combined_entries.reset_index(drop=True, inplace=True)
+
+    # Apply the styling function to the DataFrame
+    styled = combined_entries.style.apply(lambda row: pd.Series([f'background-color: {interpolate_color(row[score_column], min_score, max_score)};'], index=[text_column]), axis=1)
+
+    # Write the styled DataFrame to an HTML file
+    styled.to_html(f'{score_column}_scores.html')
+
+def write_to_html_pairs(pairs, QA):
+
+    # Calculate scores and add as a new column
+    pairs['Score'] = pairs.apply(lambda row: rank_QA_pair(row) if QA else rank_RTE_pair(row), axis=1)
+    pairs.reset_index(drop=True, inplace=True)
+    pairs['Score'] = pd.to_numeric(pairs['Score'], errors='coerce')
+
+    # Determine color based on scores
+    min_score = np.nanmin(pairs['Score'])
+    max_score = np.nanmax(pairs['Score'])
+    pairs['Color'] = pairs['Score'].apply(lambda score: interpolate_color(score, min_score, max_score) if pd.notnull(score) else 'white')
+    
+    # Convert DataFrame to HTML
+    styled_html = pairs.style.apply(lambda x: [f"background-color: {color};" for color in x['Color']], axis=0)
+    if QA:
+        styled_html.to_html('pairs_QA_scores.html')
+    else:
+        styled_html.to_html('pairs_RTE_scores.html')
 
 def read_sentences(sentences_file):
     logging.info('Reading sentences.')
@@ -140,8 +227,8 @@ def add_sentence_scores(all_sentences, scale=False):
     """
     logging.info('Computing sentence scores.')
     scaler_votes = get_scalers(all_sentences)
-    all_sentences['pivot_score'] = all_sentences.apply(calculate_pivot_score, scaler_votes, axis=1)
-    all_sentences['question_score'] = all_sentences.apply(calculate_question_score, scaler_votes, axis=1)
+    all_sentences['pivot_score'] = all_sentences.apply(calculate_pivot_score, axis=1, args=(scaler_votes,))
+    all_sentences['question_score'] = all_sentences.apply(calculate_question_score, axis=1, args=(scaler_votes,))
 
     if scale:
         all_sentences['pivot_score'] = scale_min_max(all_sentences['pivot_score'])
@@ -154,7 +241,8 @@ def add_post_scores(all_user_posts, scale=False):
     The idea is that only the highest-scoring posts will be used (in the entailment task), to save compute.
     """
     logging.info('Computing post scores.')
-    all_user_posts['post_score'] = all_user_posts.apply(get_post_score, axis=1)
+    scaler_votes = get_scalers(all_user_posts)
+    all_user_posts['post_score'] = all_user_posts.apply(calculate_post_score, axis=1, args=(scaler_votes,))
 
     if scale:
         all_user_posts['post_score'] = scale_min_max(all_user_posts['post_score'])
@@ -173,7 +261,7 @@ def estimate_exhaustive_task_sizes(questions, pivots, posts) -> None:
         n_rte.append(len(pivots_of_user) * len(posts_of_user))
     sum_qa = sum(n_qa)
     sum_rte = sum(n_rte)
-    logging.info(f'Exhaustive estimates: {sum_qa:,} QA pairs (avg. {sum_qa/len(n_qa):,.2f} per user); {sum_rte:,} RTE pairs (avg. {sum_rte/len(n_rte):,.2f})')
+    logging.info(f'Exhaustive estimates: {sum_qa:,} QA pairs ; {sum_rte:,} RTE pairs )')
 
 
 def threshold_df_by_frac(df, criterion, frac, by):
@@ -184,11 +272,11 @@ def threshold_df_by_frac(df, criterion, frac, by):
     """
 
     result = (df
-              .sort_values(by=[by, criterion], ascending=False)
-              .groupby([by])
-              .apply(lambda group: group.loc[group[criterion] >= group.iloc[int(frac*len(group))][criterion]], include_groups=False)
-              .reset_index(drop=False)
-              )
+            .sort_values(by=[by, criterion], ascending=False)
+            .groupby([by])
+            .apply(lambda group: group.loc[group[criterion] >= group.iloc[int(frac*len(group))][criterion]])
+            .reset_index(drop=True)
+            )
 
     logging.info(f'Thresholded {criterion} to {frac}: from {len(df):,} to {len(result):,}.')
 
