@@ -3,7 +3,7 @@ import click
 import random
 import itertools
 import csv
-import time
+
 import pandas as pd
 import numpy as np
 
@@ -17,8 +17,8 @@ import tqdm
 import re
 import json
 from typing import List, Tuple
-
-from scoring_methods import get_scalers,calculate_post_score, calculate_question_score, calculate_pivot_score, filter_QA_pair, rank_QA_pair, filter_RTE_pair, rank_RTE_pair
+from sklearn.metrics.pairwise import paired_cosine_distances
+from scoring_methods import get_scalers, calculate_question_score, calculate_pivot_score, filter_QA_pair, rank_QA_pair, filter_RTE_pair, rank_RTE_pair
 
 # TODO: finish implementation of Squad-format output
 
@@ -48,81 +48,75 @@ def main(sentences, posts, n_qa, n_rte, pdf, seed):
 
     # For each user, will use only the top fraction of pivots/questions/posts:
     questions_frac = .1
-    pivots_frac = .05       # TODO: Make these cmd line args? Or config file?
-    posts_frac = .5
+    pivots_frac = .25       # TODO: Make these cmd line args? Or config file?
+    entailments_frac=0.25
 
-    outfile_QA = f'{sentences}_pairs_qa.tsv'   # TODO: Make these cmd line args?
-    outfile_RTE = f'{sentences}_pairs_rte.tsv'
+    outfile_QA = f'pairs_qa.tsv'   # TODO: Make these cmd line args?
+    outfile_RTE = f'pairs_rte.tsv'
+
+    embeddings = get_embeddings('embeddings.csv')
 
     report = PdfPages(pdf) if pdf else None
 
     all_sentences = read_sentences(sentences)
-    all_user_posts = read_posts(posts)
+    user_posts = read_posts(posts)
 
     add_sentence_scores(all_sentences)
-
-
-    add_post_scores(all_user_posts)
+   #add_post_scores(user_posts)
 
     #report_score_percentiles(all_user_posts, all_sentences, report)
 
     questions = all_sentences.dropna(subset=['question_score'])
-    pivots = all_sentences.dropna(subset=['pivot_score'])
-    user_posts = all_user_posts.dropna(subset=['post_score'])
+    pivots = all_sentences[all_sentences['from_user'] == False].dropna(subset=['pivot_score'])
+    entailments = all_sentences[all_sentences['from_user'] == True].dropna(subset=['pivot_score'])
 
     write_to_html(questions, 'question_score', 'text')
     write_to_html(pivots, 'pivot_score', 'text')
-    write_to_html(user_posts, 'post_score', 'text')
+    write_to_html(entailments, 'pivot_score', 'text')
 
     # Pre-filter by time? Not super useful.
     # potential_pivots = extract_sorted_subrange_by(potential_pivots, group_by='user_post_author_id', sort_by='user_post_created', between=[.25, .75])
     # potential_questions = extract_sorted_subrange_by(potential_questions, group_by='user_post_author_id', sort_by='user_post_created', between=[0, .75])
 
-    estimate_exhaustive_task_sizes(questions, pivots, user_posts)
+    estimate_exhaustive_task_sizes(questions, pivots, entailments)
 
-    # Use only some highest scoring fraction of sentences/posts per user
     questions_thresholded = threshold_df_by_frac(questions, 'question_score', questions_frac, by='user_post_author_id')
+    questions_thresholded = questions_thresholded.drop_duplicates()
+
     pivots_thresholded = threshold_df_by_frac(pivots, 'pivot_score', pivots_frac, by='user_post_author_id')
+    pivots_thresholded = pivots_thresholded.drop_duplicates()
 
-    # TODO: DONT threshold posts for now... because we probably don't want to accidentally
-    #       delete the user posts from through which the user interacted with the questions and pivots...
-    # user_posts_thresholded = threshold_df_by_frac(user_posts, 'post_score', posts_frac, by='user_post_author_id')
-    user_posts_thresholded = user_posts  # temporary
+    entailments_thresholded = threshold_df_by_frac(entailments, 'pivot_score', entailments_frac, by='user_post_author_id')
+    entailments_thresholded = entailments_thresholded.drop_duplicates()
 
-    estimate_exhaustive_task_sizes(questions_thresholded, pivots_thresholded, user_posts_thresholded)
+    estimate_exhaustive_task_sizes(questions_thresholded, pivots_thresholded, entailments_thresholded)
 
     logging.info('Composing QA pairs.')
-    start_time = time.time()
-    pairs_QA = select_pairs(questions_thresholded,
+    pairs_QA,similarity_dict_qa= select_pairs(questions_thresholded,
                             pivots_thresholded,
                             group_by='user_post_author_id',
                             n=n_qa,
+                            embeddings=embeddings,
                             filter=filter_QA_pair,
                             ranker=rank_QA_pair)
-    end_time = time.time()
-    logging.info(f'Selected {len(pairs_QA)} QA pairs. Duration: {end_time - start_time} seconds.')
+    logging.info(f'Selected {len(pairs_QA)} QA pairs.')
 
-
-    write_to_html_pairs(pairs_QA, QA=True)
+    write_to_html_pairs(pairs_QA, QA=True, similarity_dict=similarity_dict_qa)
 
     logging.info('Composing RTE pairs.')
-    start_time = time.time()
-    print("start QA pairs")
-    pairs_RTE = select_pairs(pivots_thresholded,
-                            user_posts_thresholded,
-                            group_by='user_post_author_id',
-                            n=n_rte,
-                            filter=filter_RTE_pair,
-                            ranker=rank_RTE_pair)
-    end_time = time.time()
-    logging.info(f'Selected {len(pairs_RTE)} RTE pairs. Duration: {end_time - start_time} seconds.')
+    pairs_RTE, similarity_dict_rte = select_pairs(pivots_thresholded,
+                             entailments_thresholded,
+                             group_by='user_post_author_id',
+                             n=n_rte,
+                             embeddings = embeddings,
+                             filter=filter_RTE_pair,
+                             ranker=rank_RTE_pair)
+    logging.info(f'Selected {len(pairs_RTE)} RTE pairs.')
 
-    write_to_html_pairs(pairs_RTE, QA=False)
-
+    write_to_html_pairs(pairs_RTE, QA=False, similarity_dict=similarity_dict_rte)
     write_qa_pairs(pairs_QA, user_posts, outfile_QA)
-    write_ent_pairs(pairs_RTE, outfile_RTE)
 
-    report.close()
+    write_ent_pairs(pairs_RTE, outfile_RTE)
 
     # Interpolate between red and green
 def interpolate_color(score, min_val, max_val):
@@ -177,20 +171,26 @@ def write_to_html(posts, score_column, text_column):
     # Write the styled DataFrame to an HTML file
     styled.to_html(f'{score_column}_scores.html')
 
-def write_to_html_pairs(pairs, QA):
-
+def write_to_html_pairs(pairs, QA, similarity_dict):
+    if isinstance(pairs, list):
+        pairs = pd.DataFrame(pairs, columns=['Post1', 'Post2'])
     # Calculate scores and add as a new column
-    pairs['Score'] = pairs.apply(lambda row: rank_QA_pair(row) if QA else rank_RTE_pair(row), axis=1)
+    pairs['Score'] = pairs.apply(lambda row: rank_QA_pair(row, similarity_dict) if QA else rank_RTE_pair(row, similarity_dict), axis=1)
     pairs.reset_index(drop=True, inplace=True)
     pairs['Score'] = pd.to_numeric(pairs['Score'], errors='coerce')
 
     # Determine color based on scores
     min_score = np.nanmin(pairs['Score'])
     max_score = np.nanmax(pairs['Score'])
+    # Convert DataFrame to HTML
     pairs['Color'] = pairs['Score'].apply(lambda score: interpolate_color(score, min_score, max_score) if pd.notnull(score) else 'white')
     
-    # Convert DataFrame to HTML
-    styled_html = pairs.style.apply(lambda x: [f"background-color: {color};" for color in x['Color']], axis=0)
+    # Convert DataFrame to HTML with styling
+    def apply_color(row):
+        return [f"background-color: {row['Color']};" for _ in row]
+    
+    styled_html = pairs.style.apply(apply_color, axis=1)
+
     if QA:
         styled_html.to_html('pairs_QA_scores.html')
     else:
@@ -235,19 +235,6 @@ def add_sentence_scores(all_sentences, scale=False):
         all_sentences['question_score'] = scale_min_max(all_sentences['question_score'])
 
 
-def add_post_scores(all_user_posts, scale=False):
-    """
-    For a dataframe with user posts, adds one column: post_score.
-    The idea is that only the highest-scoring posts will be used (in the entailment task), to save compute.
-    """
-    logging.info('Computing post scores.')
-    scaler_votes = get_scalers(all_user_posts)
-    all_user_posts['post_score'] = all_user_posts.apply(calculate_post_score, axis=1, args=(scaler_votes,))
-
-    if scale:
-        all_user_posts['post_score'] = scale_min_max(all_user_posts['post_score'])
-
-
 def estimate_exhaustive_task_sizes(questions, pivots, posts) -> None:
     """
     From three dataframes: if we did not do any further filtering, how many QA pairs and RTE pairs would we have?
@@ -287,6 +274,7 @@ def select_pairs(df1,
                  df2,
                  group_by : str = None,
                  n: int = None,
+                 embeddings=None,
                  filter: callable = None,
                  ranker: callable = None) -> List[Tuple]:
     """
@@ -298,24 +286,61 @@ def select_pairs(df1,
     """
 
     pairs = []
-
     if group_by:
         for group_label, subdf1 in tqdm.tqdm(df1.groupby(group_by)):
             subdf2 = df2.loc[df2[group_by] == group_label]
-            pairs.extend(select_pairs(subdf1, subdf2, group_by=None, n=n, filter=filter, ranker=ranker))
+            pairs_2, similarity_dict = select_pairs(subdf1, subdf2, group_by=None, n=n, embeddings=embeddings, filter=filter, ranker=ranker)
+            pairs.extend(pairs_2)
 
     else:
         for pair in itertools.product(
             df1.itertuples(),
             df2.itertuples()
         ):
+            if pair[0] == pair[1]:
+                continue  # Skip this pair
             if filter is None or filter(pair):
                 pairs.append(pair)
 
+        similarity_dict = calculate_similarity(pairs, embeddings)
+        
         random.shuffle(pairs)
-        pairs = (sorted(pairs, key=ranker) if ranker else pairs)[:n]
+        pairs = (sorted(pairs, key=lambda pair: ranker(pair, similarity_dict)) if ranker else pairs)[:n]
+    return pairs, similarity_dict
 
-    return pairs
+def calculate_similarity(pairs, embeddings):
+    embeddings_1 = []
+    embeddings_2 = []
+    pairs_id_list=[]
+    for pair in pairs:
+        sent1_id = pair[0].id
+        sent2_id = pair[1].id
+        sent1_embedding = embeddings.get(sent1_id)
+        sent2_embedding = embeddings.get(sent2_id)
+        if sent1_embedding is not None and sent2_embedding is not None:
+            embeddings_1.append(sent1_embedding)
+            embeddings_2.append(sent2_embedding)
+            pairs_id_list.append((sent1_id, sent2_id))
+    
+    distance_matrix = paired_cosine_distances(embeddings_1, embeddings_2)
+    
+    # Create a dictionary with pair_ids as keys and similarity as values
+    similarity_dict = {}
+    for idx, (sent1_id, sent2_id) in enumerate(pairs_id_list):
+        similarity = 1-distance_matrix[idx]
+        similarity_dict[(sent1_id, sent2_id)] = similarity
+    return similarity_dict
+
+def get_embeddings(file_path):
+    embeddings = {}
+    with open(file_path, 'r') as f:
+        reader = csv.reader(f)
+        header = next(reader)  # Skip the header
+        for row in reader:
+            post_id = row[0]
+            embedding = np.array([float(value) for value in row[1:]], dtype=float)
+            embeddings[post_id] = embedding
+    return embeddings
 
 
 def report_score_percentiles(posts, sentences, pdf=None):
@@ -529,10 +554,6 @@ def write_ent_pairs(pairs, outfile):
             if hasattr(pivot, 'previous') and pivot.previous is not None:
                 prev_pivot = replace_last_punctuation(pivot.previous)
                 new_pivot = prev_pivot + " " +new_pivot
-            new_pivot = new_pivot.replace('\t', ' ')  # Replace tabs with spaces
-            new_post = new_post.replace('\t', ' ')  # Replace tabs with spaces
-            new_pivot = re.sub(r'\s+', ' ', new_pivot)  # Replace multiple spaces with a single space
-            new_post = re.sub(r'\s+', ' ', new_post)  # Replace multiple spaces with a single space
             tsv_writer.writerow([n, pivot_id,new_pivot, new_post])
 
 
@@ -573,20 +594,11 @@ def write_qa_pairs(pairs, posts, outfile):
                 prev_question = replace_last_punctuation(question.previous)
                 new_question = prev_question + ". " + new_question
 
-            # Handle previous context for post, if available
-            #new_question =new_question.replace('\t', ' ')  # Replace tabs with spaces
-            #new_question = re.sub(r'\s+', ' ', new_question)  # Replace multiple spaces with a single space
-            #new_post = post.replace('\t', ' ')  # Replace tabs with spaces
-            #new_post = re.sub(r'\s+', ' ', new_post)  # Replace multiple spaces with a single space
-
-            #pivot_text = pivot.text.replace('\t', ' ')  # Replace tabs with spaces
-            #pivot_text = re.sub(r'\s+', ' ', pivot_text) 
-
-            new_start= new_post.find(pivot.text)
+            new_start= post.find(pivot.text)
             new_end = new_start + len(pivot.text)
 
             pair_key = (new_question, post_id)
-            pair_post = (new_question,new_post)
+            pair_post = (new_question,post)
 
             # Add the pivot positions to the dictionary
             if pair_key in pair_positions:
@@ -595,8 +607,8 @@ def write_qa_pairs(pairs, posts, outfile):
                 pair_positions[pair_post] = [(new_start, new_end)]
                 pair_pivots_ids[pair_post] = pivot_id
 
-        for index, ((new_question, new_post), positions) in enumerate(pair_positions.items()):
-            tsv_writer.writerow([index, pair_pivots_ids[(new_question, new_post)], new_question, new_post, positions])
+        for index, ((new_question, post), positions) in enumerate(pair_positions.items()):
+            tsv_writer.writerow([index, pair_pivots_ids[(new_question, post)], new_question, post, positions])
 
 if __name__ == '__main__':
     main()
