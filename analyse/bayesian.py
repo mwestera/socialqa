@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-import pymc as pm
+import pymc as pm   # currently requires scipy==1.12.0
 import arviz as az
 
 import logging
@@ -38,15 +38,19 @@ def main():
     global do_sampling      # hmmmmmm
 
     # TODO make command line args
-    DRAWS, TUNE, CHAINS = 500, 500, 4
-    N_USERS, LENGTH, EFFECT = 10, 1000, .4
-    CACHE_FILE = 'cache.pkl' # Caching only works when data remains exactly the same
+    DRAWS, TUNE, CHAINS = 2000, 2000, 4
+    N_USERS, LENGTH, EFFECT = 50, 100, .8
+    CACHE_FILE = 'cache_cur3.pkl' # Caching only works when data remains exactly the same
     SEED = 12345
+    # MODEL_TYPE = 'linear'
+    # MODEL_TYPE = 'autoregressive'      # TODO Work in progress
+    MODEL_TYPE = 'cumsum'
 
     if CACHE_FILE:
         do_sampling = cached_to_disk(do_sampling, CACHE_FILE)
 
-    logging.getLogger('pymc').info(f'Random seed: {SEED}')
+    logger = logging.getLogger('pymc')
+    logger.info(f'Random seed: {SEED}')
     rng = np.random.default_rng(SEED)
 
     df = simulate_multiuser_post_histories(n_users=N_USERS, length=LENGTH, effectsize=EFFECT, rand=rng)
@@ -55,16 +59,22 @@ def main():
 
     df['time'] /= df['time'].max()  # Not sure if this normalization seemed to help with model fitting?
 
-    model = build_linear_model(df)
-    # model = build_autoregressive_model(df)    # TODO Work in progress
+    if MODEL_TYPE == 'linear':
+        model = build_linear_model(df)
+    elif MODEL_TYPE == 'autoregressive':
+        logger.warning('Autoregressive model probably doesn\'t make sense ad/or is wrongly implemented.')
+        model = build_autoregressive_model(df)
+    elif MODEL_TYPE == 'cumsum':
+        logger.warning('I don\'t think this approach works, unless perhaps the own entailing is cumsummed too?')
+        model = build_cumsum_model(df)
 
     with model:
         results = do_sampling(model, draws=DRAWS, tune=TUNE, chains=CHAINS)
 
-    azsummary = az.summary(results['trace'], round_to=2, var_names=['α', 'β', 'rho', 'tau', 'exposure'], filter_vars='like')
+    azsummary = az.summary(results['trace'], round_to=2, var_names=['α', 'β'], filter_vars='like')
     print(azsummary.to_string())
 
-    azplot = az.plot_trace(results['trace'], combined=True, var_names=['α', 'β', 'rho', 'tau', 'exposure'], filter_vars='like')
+    azplot = az.plot_trace(results['trace'], combined=True, var_names=['α', 'β'], filter_vars='like')
     plt.show()
 
     posterior_plot = plot_posterior(df, results['trace'], results['posterior'])
@@ -198,7 +208,8 @@ def build_linear_model(df):
 
 def build_autoregressive_model(df):
     """
-    More sophisticated model that attempts to model 'curiosity' as a latent, auto-regressive variable.
+    More sophisticated model that attempts to model 'engagement' with the information
+    as a latent, auto-regressive variable. (Later to be added: engagement with the question.)
     Based on https://www.pymc.io/projects/examples/en/latest/time_series/AR.html
     """
     with pm.Model(check_bounds=False) as model:
@@ -209,17 +220,56 @@ def build_autoregressive_model(df):
         β1 = pm.Normal("β1", mu=0, sigma=0.05)
         σ = pm.HalfNormal("σ", sigma=0.05)
 
-        α_ar = pm.Normal("α_ar", mu=1.0, sigma=1.0)
+        α_ar = pm.Normal("α_ar", mu=.4, sigma=0.05)
         β_ar = pm.Normal("β_ar", mu=0, sigma=5)
-        rho = pm.Deterministic("rho", α_ar + β_ar * df['engaged_entailing'])
+
+        rho = pm.Normal("rho", mu=0, sigma=0.5)
         tau = pm.Exponential("tau", lam=0.5)
-        exposure = pm.AR("exposure", rho=rho, constant=True, steps=1, tau=tau, init_dist=pm.Normal.dist(0, 10))
+        exposure = pm.AR("exposure", rho=rho, constant=False, tau=tau, init_dist=pm.Normal.dist(0, 0.05), ar_order=1, steps=50)
+        # TODO: I don't think AR is what I need?! base it on cumsum?
+        # TODO: constant should be False?! It's incorporated in the a_ar.
+
+        engaged_entailing_filled = df['engaged_entailing'].fillna(0)
+        # fillna(0) works for the current model, but may not be fully general.
 
         β2 = pm.Normal("β2", mu=0, sigma=0.5)
         trend = pm.Deterministic("trend", α + β1 * df['time'] + β2 * exposure)
         likelihood = pm.Normal("likelihood", mu=trend, sigma=σ, observed=df['own_entailing'])
 
     return model
+
+
+
+def build_cumsum_model(df):
+    """
+    More sophisticated model that attempts to model 'engagement' with the information
+    as a latent, auto-regressive variable. (Later to be added: engagement with the question.)
+    Based on https://www.pymc.io/projects/examples/en/latest/time_series/AR.html
+    """
+    curiosity = np.nancumsum(df['questions'] ** 3)
+    engagement = np.nancumsum(df['engaged_entailing'] ** 3)
+    # TODO: Maybe sigmoid?
+
+    with pm.Model(check_bounds=False) as model:
+        # Or consider using a discrete switch point from https://www.pymc.io/projects/docs/en/stable/learn/core_notebooks/pymc_overview.html#case-study-2-coal-mining-disasters
+        # How to handle missing values in input:  https://areding.github.io/6420-pymc/unit8/Unit8-missrats.html
+
+        curiosity = pm.Normal("curiosity", mu=0.0, sigma=0.5, observed=curiosity)
+        # engagement = pm.Normal("engagement", mu=0.4, sigma=0.05, observed=engagement)
+
+        α = pm.Normal("α", mu=0, sigma=0.5)
+        # βtime = pm.Normal("βtime", mu=0, sigma=0.5)
+        βcur = pm.Normal("βcur", mu=0, sigma=0.5)
+        # βeng = pm.Normal("βeng", mu=0, sigma=0.5)
+        # βinter = pm.Normal("βinter", mu=0, sigma=0.5)
+
+        trend = pm.Deterministic("trend", α + βcur * curiosity)
+
+        σ = pm.HalfNormal("σ", sigma=0.05)
+        likelihood = pm.Normal("likelihood", mu=trend, sigma=σ, observed=df['own_entailing'])
+
+    return model
+
 
 
 def plot_posterior(df, trace, posterior):
