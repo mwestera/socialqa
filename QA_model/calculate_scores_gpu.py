@@ -18,9 +18,8 @@ $ python calculate_scores_cpu.py --model_type qa infile.tsv
 
 @click.command(help="")
 @click.argument("infile",type=str, default=sys.stdin)
-@click.option("--model_type", help="Which model to use for prediction", choices=["qa", "ent"], type=str, required=True, is_flag=False, default=None)
-
-def main(infile, qa, model_type):
+@click.argument("model_type", type=str)
+def main(infile, model_type):
     """
     Main function for calculating scores.
 
@@ -36,18 +35,18 @@ def main(infile, qa, model_type):
     # Load the model and tokenizer based on the model type
     if model_type == "qa":
         model_name = "ahotrod/albert_xxlargev1_squad2_512" 
-        model = AutoModelForQuestionAnswering.from_pretrained(model_name, device=device)
+        model = AutoModelForQuestionAnswering.from_pretrained(model_name).to(device)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    elif model_type == "ent":
-        model_name = "ynie/albert-xxlarge-v2"
-        model = AutoModelForSequenceClassification.from_pretrained(model_name, device=device)
+    elif model_type == "rte":
+        model_name = "ynie/albert-xxlarge-v2-snli_mnli_fever_anli_R1_R2_R3-nli"
+        model = AutoModelForSequenceClassification.from_pretrained(model_name).to(device)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # Process and write scores
-    process_and_write_scores(infile, tokenizer, model, qa=qa)
+    process_and_write_scores(infile, tokenizer, model, model_type)
 
-def process_and_write_scores(infile, tokenizer, model, rte, qa, chunk_size=100):
+def process_and_write_scores(infile, tokenizer, model, model_type, chunk_size=100):
     """
     Process the file in chunks and write scores incrementally to avoid memory issues.
     """
@@ -76,7 +75,7 @@ def process_and_write_scores(infile, tokenizer, model, rte, qa, chunk_size=100):
                 except:
                     continue
             # If the model type is QA
-            if(qa):
+            if model_type=="qa":
                 qa_list = eval(row['pivot_positions'])  # Convert the string representation of the list to an actual list
                 if(qa_list[0][0]>1000):
                     new_post, new_qa_list = reduce_context_size(400, qa_list, row)
@@ -92,7 +91,7 @@ def process_and_write_scores(infile, tokenizer, model, rte, qa, chunk_size=100):
                     batch_qas.append(qa_list)
 
             # If the model type is Entailment
-            elif(rte):
+            elif model_type  == 'rte':
                 sentence1 = row['sentence1']
                 sentence2 = row['sentence2']
                 batch_texts.append((sentence1, sentence2))
@@ -100,17 +99,17 @@ def process_and_write_scores(infile, tokenizer, model, rte, qa, chunk_size=100):
             batch_rows.append(row)
 
             if len(batch_rows) >= chunk_size:
-                if qa:
+                if model_type=='qa':
                     scores = model_predict_qa([texts[0] for texts in batch_texts], [texts[1] for texts in batch_texts], batch_qas, tokenizer, model)
                 else:
                     scores = model_predict_rte([texts[0] for texts in batch_texts], [texts[1] for texts in batch_texts], tokenizer, model)
                 for row, score in zip(batch_rows, scores):
                     row['score'] = score
                     writer.writerow(row)
-                batch_rows, batch_texts = [], []  # Reset for next batch
+                batch_rows, batch_texts, batch_qas= [], [], []  # Reset for next batch
 
         if batch_rows:
-            if qa:
+            if model_type =='qa':
                 scores = model_predict_qa([texts[0] for texts in batch_texts], [texts[1] for texts in batch_texts], batch_qas, tokenizer, model)
             else:
                 scores = model_predict_rte([texts[0] for texts in batch_texts], [texts[1] for texts in batch_texts], tokenizer, model)
@@ -193,10 +192,10 @@ def find_pivot(tokenizer, post, inputs, start_char, end_char):
     start_token = None
     end_token = None
     # Iterate through the input tokens
-    for i in range(len(inputs.input_ids[0])):
+    for i in range(len(inputs['input_ids'][0])):
         # Check if the current token matches the start of the encoded sentence
         # Start and end of the encoded sentence could be slightly different when taking sentence separately, middle should be unchanged
-        if inputs.input_ids[0][i+2:i+len(encoded_sentence)-1].tolist()== encoded_sentence[2:-1]:
+        if inputs['input_ids'][0][i+2:i+len(encoded_sentence)-1].tolist()== encoded_sentence[2:-1]:
             start_token = i+1
             end_token = i + len(encoded_sentence) - 1
             break
@@ -239,10 +238,10 @@ def model_predict_qa(questions, contexts, qa_lists, tokenizer, model):
 
     all_probabilities = []
     # Process each question-context pair in the batch
-    for index, (start_chars, end_chars) in enumerate(qa_lists):
-        probabilities = []
-        for start_char, end_char in zip(start_chars, end_chars):
-            start_token, end_token = find_pivot(contexts[index], start_char, end_char, tokenizer, inputs.encodings[index])
+    for qa_list in qa_lists:
+        for index, (start_char, end_char) in enumerate(qa_list):
+            probabilities = []
+            start_token, end_token = find_pivot(tokenizer,contexts[index], inputs, start_char, end_char )
             if start_token is None or end_token is None:
                 probabilities.append(0)
                 continue
