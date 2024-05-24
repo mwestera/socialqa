@@ -11,14 +11,7 @@ from scipy.spatial.distance import cdist
 
 
 """
-{"id": "g8yledd_2136-2181", "start": 2136, "end": 2181, "text": "There was baggies of trail mix, still sealed.",
- "previous": "Bears don't have that much dexterity.", "next": "The mess was *very* human.", "num_comments": null, 
- "upvote_ratio": null, "post_id": "g8yledd", "snippet_id": "g8yledd", "from": "parent_comment",
-   "from_user": false, "score": 988,
-"context": "Maybe a bear or some other animal ripped through everything and the people whose camp it was were out hiking and hadn't found the mess yet?", "user_post_id": "g948cqa",
- "user_post_author_id": "user_0", "subreddit_name": "AskReddit", 
- "user_post_created": "2020-10-17 16:41:59",
- "subjectivity": 0.937221884727478, "concreteness": 2.585}
+This script contains the scoring methods used to calculate the scores of the sentences and pairs.
 """
 def get_embeddings_file():
     with open('config.json', 'r') as config_file:
@@ -47,7 +40,7 @@ def calculate_question_score(sentence: pd.Series, scaler_votes: MinMaxScaler):
     score += weights['origin_weight'] * get_origin_score(sentence)
     score += weights['vote_weight'] * scaled_vote_score
     score += weights['length_weight'] * get_length_score(sentence,mean_length = 55,std_dev = 15)  # The standard deviation of the Gaussian function)
-    score -= weights['subjectivity_weight'] * sentence['subjectivity']
+    score += weights['subjectivity_weight'] * sentence['subjectivity']
     score += weights['concreteness_weight'] * sentence['concreteness']
     return score
 
@@ -67,7 +60,7 @@ def calculate_pivot_score(sentence: pd.Series,scaler_votes: MinMaxScaler):
     score += weights['origin_weight'] * get_origin_score(sentence)
     score += weights['vote_weight'] * scaled_vote_score
     score += weights['length_weight'] * get_length_score(sentence,mean_length = 55,std_dev = 15)
-    score -= weights['subjectivity_weight'] * sentence['subjectivity']
+    score += weights['subjectivity_weight'] * sentence['subjectivity']
     score += weights['concreteness_weight'] * sentence['concreteness']
     return score
 
@@ -99,6 +92,9 @@ def calculate_ent_scores(pivot: pd.Series, entailment: pd.Series, similarity_dic
     return score
 
 def get_time_score(post1, post2):
+    """
+    Calculate the time score based on the time difference between two posts.
+    """
     # Time Difference
     time1 = datetime.strptime(post1['user_post_created'], "%Y-%m-%d %H:%M:%S")
     time2 = datetime.strptime(post2['user_post_created'], "%Y-%m-%d %H:%M:%S")
@@ -112,8 +108,12 @@ def get_time_score(post1, post2):
     return time_diff_score
 
 def get_embedding(post_id):
+    """
+    Get the embedding of a post based on its ID.
+    """
     embeddings_file = get_embeddings_file()
     embeddings_df = pd.read_csv(embeddings_file)
+
     first_column_name = embeddings_df.columns[0]  # Get the name of the first column
     embedding_columns = embeddings_df.columns[1:]
 
@@ -173,6 +173,9 @@ def get_number_of_votes(score, upvote_ratio):
     return (upvotes, downvotes)
 
 def get_vote_score(sentence):
+    """
+    Calculate the score of a sentence based on the number of votes.
+    """
     if sentence['upvote_ratio'] is None or np.isnan(sentence['upvote_ratio']):
         return 0
     
@@ -181,6 +184,9 @@ def get_vote_score(sentence):
     return votes
 
 def get_length_score(sentence, mean_length=55, std_dev=15):
+    """
+    Calculate the score of a sentence based on its length.
+    """
     text = sentence['text']
     tokens = text.split()
     length = len(tokens)
@@ -190,12 +196,12 @@ def get_length_score(sentence, mean_length=55, std_dev=15):
     # Calculate the score using the Gaussian function
     score = np.exp(-((length - mean_length) ** 2) / (2 * std_dev ** 2))
     
-    # Normalize the score to the range [-5, 0] (since the original function had this range)
-    score = -5 * (1 - score)
-    
     return score
 
 def get_origin_score(sentence):
+    """
+    Calculate the origin score of a sentence.
+    """
     sentence_from = sentence['from']
     if sentence_from in ['root_submission_title']:
         score = 0.8
