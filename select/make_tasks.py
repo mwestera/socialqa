@@ -34,23 +34,38 @@ NOTE: The metrics, scores etc. for filtering/selecting items are in the separate
 @click.command(help="")
 @click.argument("sentences", type=click.File('r'), default=sys.stdin)
 @click.argument("posts", type=click.File('r'), default=None)
+@click.option('--questions_frac', default=0.1, help='Fraction of questions to use.')
+@click.option('--pivots_frac', default=0.25, help='Fraction of pivots to use.')
+@click.option('--entailments_frac', default=0.25, help='Fraction of entailments to use.')
 @click.option("--n_qa", help="Max how many QA items per user.", type=int, required=False, is_flag=False, default=None)
 @click.option("--n_rte", help="Max how many RTE items per user.", type=int, required=False, is_flag=False, default=None)
 @click.option("--pdf", help="Path to pdf file to write report to.", type=click.Path(dir_okay=False), required=False, is_flag=False, default=None)
 @click.option("--seed", help="Random seed to use.", type=int, required=False, is_flag=False, default=None)
-def main(sentences, posts, n_qa, n_rte, pdf, seed):
 
+def main(sentences, posts, questions_frac, pivots_frac, entailments_frac, n_qa, n_rte, pdf, seed):
+    """
+    Main function for generating QA and RTE pairs.
+
+    Args:
+        sentences (str): Path to the file containing sentences.
+        posts (str): Path to the file containing posts.
+        questions_frac (float): Fraction of questions to use.
+        pivots_frac (float): Fraction of pivots to use.
+        entailments_frac (float): Fraction of entailments to use.
+        n_qa (int): Number of QA pairs to generate.
+        n_rte (int): Number of RTE pairs to generate.
+        pdf (str): Path to the PDF file to save the report.
+        seed (int): Seed for random number generation.
+
+    Returns:
+        None
+    """
     logging.basicConfig(level=logging.INFO)
 
     seed = seed or random.randint(0, 999999)
     random.seed(seed)
     logging.info(f'Seed: {seed}')
-
-    # For each user, will use only the top fraction of pivots/questions/posts:
-    questions_frac = .1
-    pivots_frac = .25       # TODO: Make these cmd line args? Or config file?
-    entailments_frac=0.25
-
+    # 
     outfile_QA = f'pairs_qa.tsv'   # TODO: Make these cmd line args?
     outfile_RTE = f'pairs_rte.tsv'
 
@@ -62,17 +77,15 @@ def main(sentences, posts, n_qa, n_rte, pdf, seed):
     user_posts = read_posts(posts)
 
     add_sentence_scores(all_sentences)
-   #add_post_scores(user_posts)
 
-    #report_score_percentiles(all_user_posts, all_sentences, report)
-
+    
     questions = all_sentences.dropna(subset=['question_score'])
     pivots = all_sentences[all_sentences['from_user'] == False].dropna(subset=['pivot_score'])
     entailments = all_sentences[all_sentences['from_user'] == True].dropna(subset=['pivot_score'])
 
-    write_to_html(questions, 'question_score', 'text')
-    write_to_html(pivots, 'pivot_score', 'text')
-    write_to_html(entailments, 'pivot_score', 'text')
+    write_to_html(questions, 'question_score')
+    write_to_html(pivots, 'pivot_score')
+    write_to_html(entailments, 'pivot_score')
 
     # Pre-filter by time? Not super useful.
     # potential_pivots = extract_sorted_subrange_by(potential_pivots, group_by='user_post_author_id', sort_by='user_post_created', between=[.25, .75])
@@ -80,6 +93,7 @@ def main(sentences, posts, n_qa, n_rte, pdf, seed):
 
     estimate_exhaustive_task_sizes(questions, pivots, entailments)
 
+    # Filter low scoring sentences
     questions_thresholded = threshold_df_by_frac(questions, 'question_score', questions_frac, by='user_post_author_id')
     questions_thresholded = questions_thresholded.drop_duplicates()
 
@@ -92,19 +106,25 @@ def main(sentences, posts, n_qa, n_rte, pdf, seed):
     estimate_exhaustive_task_sizes(questions_thresholded, pivots_thresholded, entailments_thresholded)
 
     logging.info('Composing QA pairs.')
-    pairs_QA,similarity_dict_qa= select_pairs(questions_thresholded,
+    
+    pairs_QA= select_pairs(questions_thresholded,
                             pivots_thresholded,
                             group_by='user_post_author_id',
                             n=n_qa,
                             embeddings=embeddings,
                             filter=filter_QA_pair,
                             ranker=rank_QA_pair)
+    
     logging.info(f'Selected {len(pairs_QA)} QA pairs.')
+
+    similarity_dict_qa = calculate_similarity(pairs_QA, embeddings)
+    pairs = (sorted(pairs_QA, key=lambda pair: rank_QA_pair(pair, similarity_dict_qa)) if rank_QA_pair else pairs)[:n_qa]
+    logging.info(f'Calculated similarities of {len(similarity_dict_qa)}/{len(pairs_QA)} QA pairs.')
 
     write_to_html_pairs(pairs_QA, QA=True, similarity_dict=similarity_dict_qa)
 
     logging.info('Composing RTE pairs.')
-    pairs_RTE, similarity_dict_rte = select_pairs(pivots_thresholded,
+    pairs_RTE= select_pairs(pivots_thresholded,
                              entailments_thresholded,
                              group_by='user_post_author_id',
                              n=n_rte,
@@ -112,10 +132,12 @@ def main(sentences, posts, n_qa, n_rte, pdf, seed):
                              filter=filter_RTE_pair,
                              ranker=rank_RTE_pair)
     logging.info(f'Selected {len(pairs_RTE)} RTE pairs.')
+    similarity_dict_rte = calculate_similarity(pairs_RTE, embeddings)
+    pairs_RTE = (sorted(pairs_RTE, key=lambda pair: rank_RTE_pair(pair, similarity_dict_rte)) if rank_RTE_pair else pairs)[:n_rte]
+    logging.info(f'Calculated similarities of {len(similarity_dict_rte)}/{len(pairs_RTE)} RTE pairs.')
 
     write_to_html_pairs(pairs_RTE, QA=False, similarity_dict=similarity_dict_rte)
     write_qa_pairs(pairs_QA, user_posts, outfile_QA)
-
     write_ent_pairs(pairs_RTE, outfile_RTE)
 
     # Interpolate between red and green
@@ -137,10 +159,13 @@ def interpolate_color(score, min_val, max_val):
     return f"rgb({red},{green},{blue})"
 
 def style_text(score, min_score, max_score):
+    """
+    Style the text based on the score.
+    """
     color = interpolate_color(score, min_score, max_score)
     return f'background-color: {color};'
 
-def write_to_html(posts, score_column, text_column):
+def write_to_html(posts, score_column):
     """
     Write a styled DataFrame to an HTML file.
 
@@ -166,37 +191,54 @@ def write_to_html(posts, score_column, text_column):
     combined_entries.reset_index(drop=True, inplace=True)
 
     # Apply the styling function to the DataFrame
-    styled = combined_entries.style.apply(lambda row: pd.Series([f'background-color: {interpolate_color(row[score_column], min_score, max_score)};'], index=[text_column]), axis=1)
-
+    styled = combined_entries.style.apply(lambda row: ['background-color: {}'.format(interpolate_color(row[score_column], min_score, max_score))]*len(row), axis=1)
     # Write the styled DataFrame to an HTML file
     styled.to_html(f'{score_column}_scores.html')
 
 def write_to_html_pairs(pairs, QA, similarity_dict):
-    if isinstance(pairs, list):
-        pairs = pd.DataFrame(pairs, columns=['Post1', 'Post2'])
-    # Calculate scores and add as a new column
-    pairs['Score'] = pairs.apply(lambda row: rank_QA_pair(row, similarity_dict) if QA else rank_RTE_pair(row, similarity_dict), axis=1)
-    pairs.reset_index(drop=True, inplace=True)
-    pairs['Score'] = pd.to_numeric(pairs['Score'], errors='coerce')
+    data = []
+    for idx, (sent1, sent2) in enumerate(pairs):
+        data.append({
+            'Sentence 1 Text': sent1.text,
+            'Sentence 1 Question Score': sent1.question_score,
+            'Sentence 1 Pivot Score': sent1.pivot_score,
+            'Sentence 1 Subreddit Name': sent1.subreddit_name,
+            'Sentence 2 Text': sent2.text,
+            'Sentence 2 Question Score': sent2.question_score,
+            'Sentence 2 Pivot Score': sent2.pivot_score,
+            'Sentence 2 Subreddit Name': sent2.subreddit_name,
+            'post1': sent1,
+            'post2': sent2
+        })
+
+    df = pd.DataFrame(data)
+    print(df.head())
+    df['Score'] = df.apply(lambda row: rank_QA_pair((row['post1'], row['post2']), similarity_dict) if QA else rank_RTE_pair((row['post1'], row['post2']), similarity_dict), axis=1)
+    df.reset_index(drop=True, inplace=True)
+    df['Score'] = pd.to_numeric(df['Score'], errors='coerce')
 
     # Determine color based on scores
-    min_score = np.nanmin(pairs['Score'])
-    max_score = np.nanmax(pairs['Score'])
+    min_score = np.nanmin(df['Score'])
+    max_score = np.nanmax(df['Score'])
     # Convert DataFrame to HTML
-    pairs['Color'] = pairs['Score'].apply(lambda score: interpolate_color(score, min_score, max_score) if pd.notnull(score) else 'white')
-    
+    df['Color'] = df['Score'].apply(lambda score: interpolate_color(score, min_score, max_score) if pd.notnull(score) else 'white')
+    df = df.drop(['post1', 'post2'], axis=1)
     # Convert DataFrame to HTML with styling
     def apply_color(row):
         return [f"background-color: {row['Color']};" for _ in row]
     
-    styled_html = pairs.style.apply(apply_color, axis=1)
+    styled_html = df.style.apply(apply_color, axis=1)
 
     if QA:
         styled_html.to_html('pairs_QA_scores.html')
     else:
         styled_html.to_html('pairs_RTE_scores.html')
+    return
 
 def read_sentences(sentences_file):
+    """
+    Read the sentences from the file and return them as a DataFrame.
+    """
     logging.info('Reading sentences.')
     df = pd.read_json(sentences_file, lines=True)
     df['user_post_created'] = pd.to_datetime(df['user_post_created'])
@@ -205,6 +247,9 @@ def read_sentences(sentences_file):
 
 
 def read_posts(posts_file):
+    """
+    Read the posts from the file and return them as a DataFrame.
+    """
     logging.info('Reading posts.')
     df = pd.read_json(posts_file, lines=True)
     df['created'] = pd.to_datetime(df['created'])
@@ -286,10 +331,12 @@ def select_pairs(df1,
     """
 
     pairs = []
+    df1 = df1.drop_duplicates(subset='text')
+    df2 = df2.drop_duplicates(subset='text')
     if group_by:
         for group_label, subdf1 in tqdm.tqdm(df1.groupby(group_by)):
             subdf2 = df2.loc[df2[group_by] == group_label]
-            pairs_2, similarity_dict = select_pairs(subdf1, subdf2, group_by=None, n=n, embeddings=embeddings, filter=filter, ranker=ranker)
+            pairs_2 = select_pairs(subdf1, subdf2, group_by=None, n=n, embeddings=embeddings, filter=filter, ranker=ranker)
             pairs.extend(pairs_2)
 
     else:
@@ -301,23 +348,27 @@ def select_pairs(df1,
                 continue  # Skip this pair
             if filter is None or filter(pair):
                 pairs.append(pair)
-
-        similarity_dict = calculate_similarity(pairs, embeddings)
         
         random.shuffle(pairs)
-        pairs = (sorted(pairs, key=lambda pair: ranker(pair, similarity_dict)) if ranker else pairs)[:n]
-    return pairs, similarity_dict
+    return pairs
 
 def calculate_similarity(pairs, embeddings):
+    """
+    Calculate the cosine similarity between the embeddings of the sentences in the pairs.
+    """
     embeddings_1 = []
     embeddings_2 = []
     pairs_id_list=[]
     for pair in pairs:
+
         sent1_id = pair[0].id
         sent2_id = pair[1].id
+
         sent1_embedding = embeddings.get(sent1_id)
         sent2_embedding = embeddings.get(sent2_id)
+
         if sent1_embedding is not None and sent2_embedding is not None:
+
             embeddings_1.append(sent1_embedding)
             embeddings_2.append(sent2_embedding)
             pairs_id_list.append((sent1_id, sent2_id))
@@ -327,11 +378,16 @@ def calculate_similarity(pairs, embeddings):
     # Create a dictionary with pair_ids as keys and similarity as values
     similarity_dict = {}
     for idx, (sent1_id, sent2_id) in enumerate(pairs_id_list):
+
         similarity = 1-distance_matrix[idx]
         similarity_dict[(sent1_id, sent2_id)] = similarity
+
     return similarity_dict
 
 def get_embeddings(file_path):
+    """
+    Read embeddings from a file and return them as a dictionary.
+    """
     embeddings = {}
     with open(file_path, 'r') as f:
         reader = csv.reader(f)
@@ -537,14 +593,15 @@ def write_ent_pairs(pairs, outfile):
     logging.info(f'Writing {len(pairs)} pairs to {outfile} in RTE format.')
     with open(outfile, 'w') as file:
         tsv_writer = csv.writer(file, delimiter='\t')
-        tsv_writer.writerow(['index','pivot_id','sentence1', 'sentence2'])
+        tsv_writer.writerow(['index','pivot_id', 'entailment_id','sentence1', 'sentence2'])
         def replace_last_punctuation(text):
             return re.sub(r'([.?!])[^.?!]*$', ',', text)
         
         for n, (pivot, post) in enumerate(pairs):
             new_post = post.text
             new_pivot = pivot.text
-            pivot_id = pivot.snippet_id
+            pivot_id = pivot.id
+            entailment_id = post.id
             # Handle previous context for post, if available
             if hasattr(post, 'previous') and post.previous is not None:
                 prev_post= replace_last_punctuation(post.previous)
@@ -554,7 +611,11 @@ def write_ent_pairs(pairs, outfile):
             if hasattr(pivot, 'previous') and pivot.previous is not None:
                 prev_pivot = replace_last_punctuation(pivot.previous)
                 new_pivot = prev_pivot + " " +new_pivot
-            tsv_writer.writerow([n, pivot_id,new_pivot, new_post])
+                
+            prev_pivot = prev_pivot.replace('\n', ' ')
+            new_pivot = new_pivot.replace('\n', ' ')
+            new_post = new_post.replace('\n', ' ')
+            tsv_writer.writerow([n, pivot_id, entailment_id, new_pivot, new_post])
 
 
 def write_qa_pairs(pairs, posts, outfile):
@@ -575,7 +636,7 @@ def write_qa_pairs(pairs, posts, outfile):
     logging.info(f'Writing {len(pairs)} pairs to {outfile} in tsv format.')
     with open(outfile, 'w', newline='') as file:
         tsv_writer = csv.writer(file, delimiter='\t')
-        tsv_writer.writerow(['index','pivot_id','question', 'post', 'pivot_positions'])
+        tsv_writer.writerow(['index','question_id','pivot_id','post_id','question', 'post', 'pivot','pivot_positions'])
         
         # Function to replace the last punctuation mark in a sentence with a comma
         def replace_last_punctuation(text):
@@ -583,32 +644,25 @@ def write_qa_pairs(pairs, posts, outfile):
 
         pair_positions = {}
         pair_pivots_ids={}
-        for (question, pivot) in pairs:
+        for idx, (question, pivot) in enumerate(pairs):
             new_question = question.text
             post_id = pivot.post_id
-            pivot_id = pivot.snippet_id
-            post = id_text_dict.get(post_id)['text']  # Get the text from the ID using the dictionary
-
+            pivot_id = pivot.id
+            post_text = id_text_dict[post_id]['text']
+            
+            question_id = question.id
+            post = id_text_dict.get(post_id)  # Get the text from the ID using the dictionary
             # Handle previous context for question, if available
             if hasattr(question, 'previous') and question.previous is not None:
                 prev_question = replace_last_punctuation(question.previous)
-                new_question = prev_question + ". " + new_question
+                new_question = prev_question + " " + new_question
 
-            new_start= post.find(pivot.text)
+            new_start= post_text.find(pivot.text)
             new_end = new_start + len(pivot.text)
-
-            pair_key = (new_question, post_id)
-            pair_post = (new_question,post)
-
-            # Add the pivot positions to the dictionary
-            if pair_key in pair_positions:
-                pair_positions[pair_post].append((new_start, new_end))
-            else:
-                pair_positions[pair_post] = [(new_start, new_end)]
-                pair_pivots_ids[pair_post] = pivot_id
-
-        for index, ((new_question, post), positions) in enumerate(pair_positions.items()):
-            tsv_writer.writerow([index, pair_pivots_ids[(new_question, post)], new_question, post, positions])
+            new_question = new_question.replace('\n', ' ')
+            new_post = post_text.replace('\n', ' ')
+            new_pivot = pivot.text.replace('\n', ' ')
+            tsv_writer.writerow([idx, question_id, pivot_id, post_id, new_question, new_post, new_pivot, (new_start, new_end)])
 
 if __name__ == '__main__':
     main()
