@@ -22,11 +22,7 @@ The pipeline consists of the following steps:
 The pipeline is defined in the Main.py script. The configuration is loaded from the config.json file.
 weights.json is used to store the weights of the scoring method used in the pipeline.
 Example:
-    $ python Main.py
-
-    or 
-
-    $ python3 Main.py
+    $ python Main.py --post_filepost_conservative_anon
 """
 
 def run_script(script_name, *args):
@@ -34,6 +30,7 @@ def run_script(script_name, *args):
 
     # python3 or just python
     subprocess.run(['python3', script_name, *args], check=True)
+
 def main(post_file_name):
   print(f"Start running for {post_file_name}")
   # Load configuration
@@ -72,29 +69,21 @@ def main(post_file_name):
 
   # Clean posts, and remove sentences not between 5 and 50 tokens
   print("clean posts....")
- # run_script(f'{dir}/clean_posts.py', post_file)
+  run_script(f'{dir}/clean_posts.py', post_file)
 
   # Cut posts into sentences
   print("Extract Sentences...") 
-#  run_script(f'{dir}/extract_sentences.py',  f'{post_file}', f'{sentence_file}')
+  run_script(f'{dir}/extract_sentences.py',  f'{post_file}', f'{sentence_file}')
 
   # Create scores per sentence
-#  run_script(f'{dir}/classify_sentences.py',  f'{sentence_file}')
+  run_script(f'{dir}/classify_sentences.py',  f'{sentence_file}')
 
   # Create embeddings
-#  run_script(f'{dir}/embed_sentences.py', f'{sentence_file}')  # Writes to sentence_file + "_embs.csv"
+  run_script(f'{dir}/embed_sentences.py', f'new.jsonl')  # Writes to sentence_file + "_embs.csv"
   # Define the path to your JSONL file
 
   # Open the JSONL file and read the first 100 lines
-  #with open(jsonl_file_path, 'r') as f:
-  #    for i, line in enumerate(f):
-  #        if i >= 100:
-  #            break
-  #        first_100_lines.append(json.loads(line))
 
-  #with open(output_jsonl_file_path, 'w') as f:
-  #  for line in first_100_lines:
-  #      f.write(json.dumps(line) + '\n')
 
   # Select pairs
   run_script(f'{dir}/make_tasks.py',  'new.jsonl', f'{post_file}.jsonl')
@@ -106,7 +95,7 @@ def main(post_file_name):
   run_script(f'{dir}/calculate_scores_gpu.py',f'{pairs_file_RTE}', 'rte')
 
   # Create triplets, and combine scores
-  run_script(f'{dir}/create_triplets.py', f'--infile_ent {pairs_file_RTE_scores}', f'--infile_qa {pairs_file_QA_scores}', f'--outfile {output_file}')
+  #run_script(f'{dir}/create_triplets.py', f'--infile_ent {pairs_file_RTE_scores}', f'--infile_qa {pairs_file_QA_scores}', f'--outfile {output_file}')
 
 
 if __name__ == "__main__":
