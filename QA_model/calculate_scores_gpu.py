@@ -12,7 +12,8 @@ import time
 Calculate scores for the input file using a QA or Entailment model.
 
 Example:
-$ python calculate_scores_gpu.py --model_type qa infile.tsv
+$ python calculate_scores_cpu.py --model_type qa infile.tsv
+
 """
 
 @click.command(help="")
@@ -44,9 +45,8 @@ def main(infile, model_type):
 
     # Process and write scores
     process_and_write_scores(infile, tokenizer, model, model_type)
-    return
 
-def process_and_write_scores(infile, tokenizer, model, model_type, batch_size=100):
+def process_and_write_scores(infile, tokenizer, model, model_type, chunk_size=32):
     """
     Process the file in chunks and write scores incrementally to avoid memory issues.
     """
@@ -58,18 +58,16 @@ def process_and_write_scores(infile, tokenizer, model, model_type, batch_size=10
     with open(infile, 'r', encoding='utf-8') as read_file, \
          open(outfile, 'w', newline='', encoding='utf-8') as write_file:
         
-        # Read file
         tsv_reader = csv.DictReader(read_file, delimiter='\t')
         fieldnames = tsv_reader.fieldnames + ['score'] 
         
-        # Write file
         writer = csv.DictWriter(write_file, fieldnames=fieldnames, delimiter='\t')
         writer.writeheader()
         
         batch_rows=[]
         batch_texts=[]
         batch_qas=[]
-
+        print(model_type)
         for row in tqdm.tqdm(tsv_reader):
             # Check if the index is a string and convert it to an integer else it will not be processed
             if(type(row["index"])==str):
@@ -79,7 +77,7 @@ def process_and_write_scores(infile, tokenizer, model, model_type, batch_size=10
                     continue
             # If the model type is QA
             if model_type=="qa":
-                qa_list = eval(row['pivot_positions'])  # Convert the string representation of the list to an actual list
+                qa_list = eval(row['pivot_positions'])  # Convert the string representation of the list to an actual list                  
                 if(qa_list[0]>1000):
                     new_post, new_qa_list = reduce_context_size(400, qa_list, row)
                     question = row['question']
@@ -103,8 +101,7 @@ def process_and_write_scores(infile, tokenizer, model, model_type, batch_size=10
 
             batch_rows.append(row)
 
-            # Predict after batch size is full
-            if len(batch_rows) >= batch_size:
+            if len(batch_rows) >= chunk_size:
                 if model_type=='qa':
                     scores = model_predict_qa([texts[0] for texts in batch_texts], [texts[1] for texts in batch_texts], [texts[2] for texts in batch_texts], batch_qas, tokenizer, model)
                 else:
@@ -114,7 +111,6 @@ def process_and_write_scores(infile, tokenizer, model, model_type, batch_size=10
                     writer.writerow(row)
                 batch_rows, batch_texts, batch_qas= [], [], []  # Reset for next batch
 
-        # Last iteration can include samples size < batch_size
         if batch_rows:
             if model_type =='qa':
                 scores = model_predict_qa([texts[0] for texts in batch_texts], [texts[1] for texts in batch_texts], [texts[2] for texts in batch_texts], batch_qas, tokenizer, model)
@@ -126,43 +122,14 @@ def process_and_write_scores(infile, tokenizer, model, model_type, batch_size=10
 
 
 def reduce_context_size(context_start, qa_list, row):
-    """
-    Reduces the context size of the post and updates the QA list accordingly.
-    """
-    post = row['post']
+        """
+        Reduces the context size of the post and updates the QA list accordingly.
+        """
+        post = row['post']
+        post= post[qa_list[0]-context_start:]
+        qa_list = (context_start, context_start+ (qa_list[1]-qa_list[0]))
 
-    post= post[qa_list[0][0]-context_start:]
-    qa_list[0] = (context_start, context_start+ (qa_list[0][1]-qa_list[0][0]))
-
-    return post, qa_list
-
-
-def find_sublist_in_list(big_list, sublist):
-    """
-    Find the index of a sublist in a list.
-    """
-    sublist_length = len(sublist)
-    for i in range(len(big_list)):
-        if big_list[i:i+sublist_length] == sublist:
-            return i
-    return -1
-
-def find_pivot(tokenizer, pivot, input_ids):
-    """
-    Find the pivot tokens in the post tokens.
-    """
-    # Encode the pivot
-    encoded_pivot = tokenizer.encode(pivot)[1:-1]  # Ignore the first and last token
-    # Convert the tokenized input to a list
-    input_tokens = input_ids.tolist()
-    # Check if the encoded pivot is in the tokenized input
-    pivot_index = find_sublist_in_list(input_tokens, encoded_pivot)
-
-    start_token_pos = pivot_index
-
-    end_token_pos = start_token_pos + len(encoded_pivot) -1
-
-    return start_token_pos, end_token_pos
+        return post, qa_list
 
 def model_predict_rte(sentence1s, sentence2s, tokenizer, model):
     """
@@ -198,6 +165,38 @@ def model_predict_rte(sentence1s, sentence2s, tokenizer, model):
     return predictions.tolist()
 
 
+def find_best_token_index(predictions, input_ids, tokenizer, skip_tokens):
+
+    sorted_indices = torch.argsort(predictions, descending=True)
+    for idx in sorted_indices[0]:
+        token_ids = input_ids[idx].unsqueeze(0) 
+        token = tokenizer.convert_ids_to_tokens(token_ids)[0]
+        if token not in skip_tokens:
+            return idx.item(), predictions[0, idx].item()
+    return None, None
+
+def find_sublist_in_list(big_list, sublist):
+    sublist_length = len(sublist)
+    for i in range(len(big_list)):
+        if big_list[i:i+sublist_length] == sublist:
+            return i
+    return -1
+
+def find_pivot(tokenizer, pivot, input_ids):
+    # Encode the pivot
+    encoded_pivot = tokenizer.encode(pivot)[1:-1]  # Ignore the first and last token
+    # Convert the tokenized input to a list
+    input_tokens = input_ids.tolist()
+    # Check if the encoded pivot is in the tokenized input
+    pivot_index = find_sublist_in_list(input_tokens, encoded_pivot)
+
+    start_token_pos = pivot_index
+    end_token_pos = start_token_pos + len(encoded_pivot) -1
+
+    return start_token_pos, end_token_pos
+
+
+
 def model_predict_qa(questions, posts, pivots, qa_lists, tokenizer, model):
     """
     Predicts the probabilities of answers for given lists of questions and contexts using a QA model.
@@ -219,39 +218,29 @@ def model_predict_qa(questions, posts, pivots, qa_lists, tokenizer, model):
 
     # Perform prediction
     with torch.no_grad():
-        start_time = time.time()
-        # Make prediction
         outputs = model(**inputs)
-        end_time = time.time()
-
-        print(f"Time taken for batch model prediction: {end_time - start_time} seconds")
-
-        # Softmax converts to probabilities
         predictions_start = torch.softmax(outputs.start_logits, dim=1)
         predictions_end = torch.softmax(outputs.end_logits, dim=1)
 
     probabilities = []
     # Process each question-context pair in the batch
     for idx, input_ids in enumerate(inputs['input_ids']):
+        # Create a new inputs dictionary that contains only the current elemen
 
         # Call find_pivot with the current inputs
         start_token, end_token = find_pivot(tokenizer, pivots[idx], input_ids)
 
-        # Pivot not found in post = Error
         if start_token == -1:
             probabilities.append(0)
             continue
 
         max_average_prob = 0
-
-        # Calculate the best answer combination between start and end token
         for i in range(start_token -1, end_token + 1):
             for j in range(i, end_token + 2):
 
                 average_prob = (predictions_start[idx, i] + predictions_end[idx, j]) / 2 
                 if average_prob > max_average_prob:
                     max_average_prob = average_prob
-
         probabilities.append(max_average_prob.item())
 
     return probabilities

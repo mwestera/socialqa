@@ -22,7 +22,11 @@ The pipeline consists of the following steps:
 The pipeline is defined in the Main.py script. The configuration is loaded from the config.json file.
 weights.json is used to store the weights of the scoring method used in the pipeline.
 Example:
-    $ python Main.py --post_filepost_conservative_anon
+    $ python Main.py
+
+    or 
+
+    $ python3 Main.py
 """
 
 def run_script(script_name, *args):
@@ -44,8 +48,7 @@ def main(post_file_name):
   n_rte = config['n_rte'] #Max how many RTE items per user."
 
   # Files used
-  post_file = f"{dir}/{post_file_name}"
-
+  post_file = f"{dir}/{post_file_name}.jsonl"
   # Files created
   sentence_file = f"{dir}/sentences_{post_file_name}.jsonl"
   pairs_file_QA = f'pairs_qa.tsv'
@@ -54,7 +57,6 @@ def main(post_file_name):
   pairs_file_RTE_scores = f"{dir}/{pairs_file_RTE}_scores.tsv"
   pairs_file_QA_scores = f"{dir}/{pairs_file_QA}_scores.tsv"
   output_file  = f"{post_file_name}_scores_triplets.tsv"
-
 
   # This has been done already
 #  if not os.path.exists(post_file):
@@ -69,28 +71,25 @@ def main(post_file_name):
 
   # Clean posts, and remove sentences not between 5 and 50 tokens
   print("clean posts....")
-  run_script(f'{dir}/clean_posts.py', post_file)
+  #run_script(f'{dir}/clean_posts.py', post_file)
 
   # Cut posts into sentences
   print("Extract Sentences...") 
-  run_script(f'{dir}/extract_sentences.py',  f'{post_file}', f'{sentence_file}')
+  #run_script(f'{dir}/extract_sentences.py',  f'{post_file}', f'{sentence_file}')
 
   # Create scores per sentence
-  run_script(f'{dir}/classify_sentences.py',  f'{sentence_file}')
+  #run_script(f'{dir}/classify_sentences.py',  f'{sentence_file}')
 
   # Create embeddings
-  run_script(f'{dir}/embed_sentences.py', f'new.jsonl')  # Writes to sentence_file + "_embs.csv"
-  # Define the path to your JSONL file
-
-  # Open the JSONL file and read the first 100 lines
-
-
+  # run_script(f'{dir}/embed_sentences.py', f'{sentence_file}')  # Writes to sentence_file + "_embs.csv"
+  print(sentence_file)
   # Select pairs
-  run_script(f'{dir}/make_tasks.py',  'new.jsonl', f'{post_file}.jsonl')
+  # run_script(f'{dir}/make_tasks.py',  f'{sentence_file}', f'{post_file}')
 
   # Run QA
+  print("****** START QA *******")
   run_script(f'{dir}/calculate_scores_gpu.py', f'{pairs_file_QA}', 'qa')
-
+  print("****** START RTE ******")
   # Run RTE
   run_script(f'{dir}/calculate_scores_gpu.py',f'{pairs_file_RTE}', 'rte')
 

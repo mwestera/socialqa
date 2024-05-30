@@ -34,9 +34,9 @@ NOTE: The metrics, scores etc. for filtering/selecting items are in the separate
 @click.command(help="")
 @click.argument("sentences", type=click.File('r'), default=sys.stdin)
 @click.argument("posts", type=click.File('r'), default=None)
-@click.option('--questions_frac', default=0.1, help='Fraction of questions to use.')
-@click.option('--pivots_frac', default=0.25, help='Fraction of pivots to use.')
-@click.option('--entailments_frac', default=0.25, help='Fraction of entailments to use.')
+@click.option('--questions_frac', default=0.01, help='Fraction of questions to use.')
+@click.option('--pivots_frac', default=0.01, help='Fraction of pivots to use.')
+@click.option('--entailments_frac', default=0.01, help='Fraction of entailments to use.')
 @click.option("--n_qa", help="Max how many QA items per user.", type=int, required=False, is_flag=False, default=None)
 @click.option("--n_rte", help="Max how many RTE items per user.", type=int, required=False, is_flag=False, default=None)
 @click.option("--pdf", help="Path to pdf file to write report to.", type=click.Path(dir_okay=False), required=False, is_flag=False, default=None)
@@ -111,32 +111,28 @@ def main(sentences, posts, questions_frac, pivots_frac, entailments_frac, n_qa, 
                             pivots_thresholded,
                             group_by='user_post_author_id',
                             n=n_qa,
-                            embeddings=embeddings,
                             filter=filter_QA_pair,
                             ranker=rank_QA_pair)
     
     logging.info(f'Selected {len(pairs_QA)} QA pairs.')
 
-    similarity_dict_qa = calculate_similarity(pairs_QA, embeddings)
-    pairs = (sorted(pairs_QA, key=lambda pair: rank_QA_pair(pair, similarity_dict_qa)) if rank_QA_pair else pairs)[:n_qa]
-    logging.info(f'Calculated similarities of {len(similarity_dict_qa)}/{len(pairs_QA)} QA pairs.')
+    calculate_similarity(pairs_QA, embeddings)
+    pairs = (sorted(pairs_QA, key=lambda pair: rank_QA_pair(pair)) if rank_QA_pair else pairs)[:n_qa]
 
-    write_to_html_pairs(pairs_QA, QA=True, similarity_dict=similarity_dict_qa)
+    write_to_html_pairs(pairs_QA, QA=True)
 
     logging.info('Composing RTE pairs.')
     pairs_RTE= select_pairs(pivots_thresholded,
                              entailments_thresholded,
                              group_by='user_post_author_id',
                              n=n_rte,
-                             embeddings = embeddings,
                              filter=filter_RTE_pair,
                              ranker=rank_RTE_pair)
     logging.info(f'Selected {len(pairs_RTE)} RTE pairs.')
-    similarity_dict_rte = calculate_similarity(pairs_RTE, embeddings)
-    pairs_RTE = (sorted(pairs_RTE, key=lambda pair: rank_RTE_pair(pair, similarity_dict_rte)) if rank_RTE_pair else pairs)[:n_rte]
-    logging.info(f'Calculated similarities of {len(similarity_dict_rte)}/{len(pairs_RTE)} RTE pairs.')
+    calculate_similarity(pairs_RTE, embeddings)
+    pairs_RTE = (sorted(pairs_RTE, key=lambda pair: rank_RTE_pair(pair)) if rank_RTE_pair else pairs)[:n_rte]
 
-    write_to_html_pairs(pairs_RTE, QA=False, similarity_dict=similarity_dict_rte)
+    write_to_html_pairs(pairs_RTE, QA=False)
     write_qa_pairs(pairs_QA, user_posts, outfile_QA)
     write_ent_pairs(pairs_RTE, outfile_RTE)
 
@@ -195,7 +191,7 @@ def write_to_html(posts, score_column):
     # Write the styled DataFrame to an HTML file
     styled.to_html(f'{score_column}_scores.html')
 
-def write_to_html_pairs(pairs, QA, similarity_dict):
+def write_to_html_pairs(pairs, QA):
     data = []
     for idx, (sent1, sent2) in enumerate(pairs):
         data.append({
@@ -213,7 +209,7 @@ def write_to_html_pairs(pairs, QA, similarity_dict):
 
     df = pd.DataFrame(data)
     print(df.head())
-    df['Score'] = df.apply(lambda row: rank_QA_pair((row['post1'], row['post2']), similarity_dict) if QA else rank_RTE_pair((row['post1'], row['post2']), similarity_dict), axis=1)
+    df['Score'] = df.apply(lambda row: rank_QA_pair((row['post1'], row['post2'])) if QA else rank_RTE_pair((row['post1'], row['post2'])), axis=1)
     df.reset_index(drop=True, inplace=True)
     df['Score'] = pd.to_numeric(df['Score'], errors='coerce')
 
@@ -319,7 +315,6 @@ def select_pairs(df1,
                  df2,
                  group_by : str = None,
                  n: int = None,
-                 embeddings=None,
                  filter: callable = None,
                  ranker: callable = None) -> List[Tuple]:
     """
@@ -336,7 +331,7 @@ def select_pairs(df1,
     if group_by:
         for group_label, subdf1 in tqdm.tqdm(df1.groupby(group_by)):
             subdf2 = df2.loc[df2[group_by] == group_label]
-            pairs_2 = select_pairs(subdf1, subdf2, group_by=None, n=n, embeddings=embeddings, filter=filter, ranker=ranker)
+            pairs_2 = select_pairs(subdf1, subdf2, group_by=None, n=n, filter=filter, ranker=ranker)
             pairs.extend(pairs_2)
 
     else:
@@ -356,33 +351,19 @@ def calculate_similarity(pairs, embeddings):
     """
     Calculate the cosine similarity between the embeddings of the sentences in the pairs.
     """
-    embeddings_1 = []
-    embeddings_2 = []
-    pairs_id_list=[]
-    for pair in pairs:
+    with open('similarities.tsv', 'w', newline='') as f:
+        writer = csv.writer(f, delimiter='\t')
+        for pair in pairs:
+            sent1_id = pair[0].id
+            sent2_id = pair[1].id
 
-        sent1_id = pair[0].id
-        sent2_id = pair[1].id
+            sent1_embedding = embeddings.get(sent1_id)
+            sent2_embedding = embeddings.get(sent2_id)
 
-        sent1_embedding = embeddings.get(sent1_id)
-        sent2_embedding = embeddings.get(sent2_id)
-
-        if sent1_embedding is not None and sent2_embedding is not None:
-
-            embeddings_1.append(sent1_embedding)
-            embeddings_2.append(sent2_embedding)
-            pairs_id_list.append((sent1_id, sent2_id))
-    
-    distance_matrix = paired_cosine_distances(embeddings_1, embeddings_2)
-    
-    # Create a dictionary with pair_ids as keys and similarity as values
-    similarity_dict = {}
-    for idx, (sent1_id, sent2_id) in enumerate(pairs_id_list):
-
-        similarity = 1-distance_matrix[idx]
-        similarity_dict[(sent1_id, sent2_id)] = similarity
-
-    return similarity_dict
+            if sent1_embedding is not None and sent2_embedding is not None:
+                similarity = 1 - paired_cosine_distances([sent1_embedding], [sent2_embedding])[0]
+                writer.writerow([sent1_id, sent2_id, similarity])
+    return 
 
 def get_embeddings(file_path):
     """

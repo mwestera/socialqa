@@ -64,7 +64,7 @@ def calculate_pivot_score(sentence: pd.Series,scaler_votes: MinMaxScaler):
     score += weights['concreteness_weight'] * sentence['concreteness']
     return score
 
-def calculate_qa_scores(question: pd.Series, pivot: pd.Series, similarity_dict: dict, asym: bool = False) -> float:
+def calculate_qa_scores(question: pd.Series, pivot: pd.Series, asym: bool = False) -> float:
     """
     How semantically similar or textually related are the two strings?
     Currently computes intersection-over-union.
@@ -74,10 +74,10 @@ def calculate_qa_scores(question: pd.Series, pivot: pd.Series, similarity_dict: 
     # Same Subreddit
     score = 0
     score += weights['subreddit_weight'] * get_subreddit_score(question, pivot)
-    score += weights['embeddings_weight'] * similarity_dict.get((question.id, pivot.id))
+    #score += weights['embeddings_weight'] * similarity_dict.get((question.id, pivot.id))
 
     return score
-def calculate_ent_scores(pivot: pd.Series, entailment: pd.Series, similarity_dict:dict, asym: bool = False) -> float:
+def calculate_ent_scores(pivot: pd.Series, entailment: pd.Series, asym: bool = False) -> float:
     """
     How semantically similar or textually related are the two strings?
     Currently computes intersection-over-union.
@@ -87,7 +87,7 @@ def calculate_ent_scores(pivot: pd.Series, entailment: pd.Series, similarity_dic
     # Same Subreddit
     score = 0
     score += weights['subreddit_weight'] * get_subreddit_score(pivot, entailment)
-    score += weights['embeddings_weight'] * similarity_dict.get((pivot.id, entailment.id))
+    #score += weights['embeddings_weight'] * similarity_dict.get((pivot.id, entailment.id))
     #score += weights['time_weight'] * get_time_score(pivot, entailment)
     return score
 
@@ -221,14 +221,14 @@ def filter_QA_pair(pair: tuple) -> bool:
     question, pivot = pair
     return question.user_post_created < pivot.user_post_created
 
-def rank_QA_pair(pair: tuple, similarity_dict: dict) -> float:
+def rank_QA_pair(pair: tuple) -> float:
     """
     This should give a high score for good question+pivot pairs.
     Current idea: the question_score should be high, the pivot_score, and they should be related.
     """
     question, pivot = pair
-    relatedness = calculate_qa_scores(question, pivot, similarity_dict)
-    return question.question_score * pivot.pivot_score * relatedness
+    relatedness = calculate_qa_scores(question, pivot)
+    return question.question_score * pivot.pivot_score #* relatedness
 
 def filter_RTE_pair(pair: tuple) -> bool:
     """
@@ -238,14 +238,14 @@ def filter_RTE_pair(pair: tuple) -> bool:
     pivot, entailment = pair
     return pivot.user_post_created < entailment.user_post_created
 
-def rank_RTE_pair(pair: tuple, similarity_dict: dict) -> float:
+def rank_RTE_pair(pair: tuple) -> float:
     """
     This should give a high score for good pivot+post pairs.
     Current idea: the pivot_score should be high, the post_score, and they should be related.
     """
     pivot, entailment = pair
-    relatedness = calculate_ent_scores(pivot, entailment, similarity_dict, asym=True)
-    return pivot.pivot_score * entailment.pivot_score * relatedness
+    relatedness = calculate_ent_scores(pivot, entailment, asym=True)
+    return pivot.pivot_score * entailment.pivot_score #* relatedness
 
 
 
