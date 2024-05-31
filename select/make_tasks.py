@@ -107,7 +107,7 @@ def main(sentences, posts, questions_frac, pivots_frac, entailments_frac, n_qa, 
 
     logging.info('Composing QA pairs.')
     
-    pairs_QA= select_pairs(questions_thresholded,
+    pairs_QA = select_pairs(questions_thresholded,
                             pivots_thresholded,
                             group_by='user_post_author_id',
                             n=n_qa,
@@ -117,7 +117,7 @@ def main(sentences, posts, questions_frac, pivots_frac, entailments_frac, n_qa, 
     logging.info(f'Selected {len(pairs_QA)} QA pairs.')
 
     calculate_similarity(pairs_QA, embeddings)
-    pairs = (sorted(pairs_QA, key=lambda pair: rank_QA_pair(pair)) if rank_QA_pair else pairs)[:n_qa]
+    pairs_QA = (sorted(pairs_QA, key=lambda pair: rank_QA_pair(pair)) if rank_QA_pair else pairs_QA)[:n_qa]
 
     write_to_html_pairs(pairs_QA, QA=True)
 
@@ -130,7 +130,7 @@ def main(sentences, posts, questions_frac, pivots_frac, entailments_frac, n_qa, 
                              ranker=rank_RTE_pair)
     logging.info(f'Selected {len(pairs_RTE)} RTE pairs.')
     calculate_similarity(pairs_RTE, embeddings)
-    pairs_RTE = (sorted(pairs_RTE, key=lambda pair: rank_RTE_pair(pair)) if rank_RTE_pair else pairs)[:n_rte]
+    pairs_RTE = (sorted(pairs_RTE, key=lambda pair: rank_RTE_pair(pair)) if rank_RTE_pair else pairs_RTE)[:n_rte]
 
     write_to_html_pairs(pairs_RTE, QA=False)
     write_qa_pairs(pairs_QA, user_posts, outfile_QA)
