@@ -60,7 +60,7 @@ def main(file, output,  use_spacy):
         item = json.loads(line)
         for sentence in extract_sentences_from_post(item, nlp):
             n_sentences += 1
-            if 5 <= sentence['num_tokens'] <= 50:  # Check if sentence has valid number of tokens
+            if 10 <= sentence['num_tokens'] <= 40:  # Check if sentence has valid number of tokens
                 n_valid_sentences += 1
                 with open(output, 'a') as file:
                     file.write(json.dumps(sentence) + '\n')
