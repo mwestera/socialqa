@@ -21,14 +21,13 @@ optionally applies a spellchecker.
 
 Example:
 
-$ cat collected/posts.jsonl > python clean_posts.py --autocorrect hunspell --html autocorrect_viz.html > collected/posts_cleaned.jsonl
+$ cat collected/posts.jsonl | python clean_posts.py --autocorrect hunspell --html autocorrect_viz.html > collected/posts_cleaned.jsonl
 
 """
 
-# TODO: clean_posts: veld 'text' toevoegen als vervanging voor selftext/body, wat in het geval van submissions ook de titel bevat.
-#    dat betekent dat extract_sentences gewoon van 'text' gebruik kan maken, en geen uitzonderingspositie geeft aan de titel.
 
 PUNCTUATION_PROPORTION_THRESHOLD = .1   # removes lines with more punctuation than this
+NUMERAL_PROPORTION_THRESHOLD = .2
 
 @click.command(help="Extract sentences from posts and their context. Prints each sentence as a json dictionary, storing "
                     "the text along with various meta-info.")
@@ -157,6 +156,7 @@ def clean(text: str, spellchecker=None, html=None) -> str:
     text = empty_md_url_regex.sub(r'<URL>', text)
     text = plain_url_regex.sub(r'<URL>', text)
     text = '\n'.join(line for line in text.split('\n') if line and proportion_punctuation(line) < PUNCTUATION_PROPORTION_THRESHOLD)
+    text = '\n'.join(line for line in text.split('\n') if line and proportion_numerals(line) < NUMERAL_PROPORTION_THRESHOLD)
     if not (text := text.strip()):
         return text
     # TODO Maybe remove lines starting with |
@@ -177,6 +177,14 @@ def proportion_punctuation(text):
     return sum(1 for c in text if c in string.punctuation) / len(text)
 
 
+def proportion_numerals(text):
+    """
+    Used in the main cleanup to remove overly punctuation-heavy lines.
+    """
+    return sum(c.isnumeric() for c in text) / len(text)
+
+
+
 def clean_post_entry(post_entry: dict, spellchecker, html=None):
     """
     Iterates over all the posts (submission, parent, replies, post itself) of a .jsonl post entry,
@@ -187,6 +195,14 @@ def clean_post_entry(post_entry: dict, spellchecker, html=None):
         old_text = post[text_key]
         clean_text = clean(old_text, spellchecker, html)
         post[text_key] = clean_text
+
+        # for convenience, store under 'text' key as well, in which case, for submissions, include the title in that field.
+        post['text'] = clean_text
+        if post['type'] == 'submission':
+            title = post['title'].strip()
+            if post['title'][-1] not in string.punctuation:
+                title += '.'
+            post['text'] = title + '\n' + post['text']
 
 
 def iter_post_entry(post_entry, already_done=None):
