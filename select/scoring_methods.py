@@ -39,7 +39,7 @@ def calculate_question_score(sentence: pd.Series, scaler_votes: MinMaxScaler):
         return None
     score += weights['origin_weight'] * get_origin_score(sentence)
     score += weights['vote_weight'] * scaled_vote_score
-    score += weights['length_weight'] * get_length_score(sentence,mean_length = 55,std_dev = 15)  # The standard deviation of the Gaussian function)
+    score += weights['length_weight'] * get_length_score(sentence,mean_length = 100,std_dev = 25)  # The standard deviation of the Gaussian function)
     score += weights['subjectivity_weight'] * sentence['subjectivity']
     score += weights['concreteness_weight'] * sentence['concreteness']
     return score
@@ -59,7 +59,7 @@ def calculate_pivot_score(sentence: pd.Series,scaler_votes: MinMaxScaler):
         return None
     score += weights['origin_weight'] * get_origin_score(sentence)
     score += weights['vote_weight'] * scaled_vote_score
-    score += weights['length_weight'] * get_length_score(sentence,mean_length = 55,std_dev = 15)
+    score += weights['length_weight'] * get_length_score(sentence,mean_length = 100 ,std_dev = 25)
     score += weights['subjectivity_weight'] * sentence['subjectivity']
     score += weights['concreteness_weight'] * sentence['concreteness']
     return score

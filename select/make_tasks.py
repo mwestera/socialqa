@@ -583,15 +583,6 @@ def write_ent_pairs(pairs, outfile):
             new_pivot = pivot.text
             pivot_id = pivot.id
             entailment_id = post.id
-            # Handle previous context for post, if available
-            if hasattr(post, 'previous') and post.previous is not None:
-                prev_post= replace_last_punctuation(post.previous)
-                new_post = prev_post + " " +new_post
-
-            # Handle previous context for pivot, if available
-            if hasattr(pivot, 'previous') and pivot.previous is not None:
-                prev_pivot = replace_last_punctuation(pivot.previous)
-                new_pivot = prev_pivot + " " +new_pivot
                 
             prev_pivot = prev_pivot.replace('\n', ' ')
             new_pivot = new_pivot.replace('\n', ' ')
@@ -634,9 +625,6 @@ def write_qa_pairs(pairs, posts, outfile):
             question_id = question.id
             post = id_text_dict.get(post_id)  # Get the text from the ID using the dictionary
             # Handle previous context for question, if available
-            if hasattr(question, 'previous') and question.previous is not None:
-                prev_question = replace_last_punctuation(question.previous)
-                new_question = prev_question + " " + new_question
 
             new_start= post_text.find(pivot.text)
             new_end = new_start + len(pivot.text)
