@@ -180,14 +180,17 @@ def write_to_html(posts, score_column):
     max_score = np.nanmax(posts[score_column])
 
     # Sort by the score column and take the top and bottom 100 entries
-    top_entries = posts.nlargest(100, score_column)
-    bottom_entries = posts.nsmallest(100, score_column)
-    combined_entries = pd.concat([top_entries, bottom_entries])
-    # Reset the index of the DataFrame
-    combined_entries.reset_index(drop=True, inplace=True)
+    # Calculate quantiles
+    posts['Quantile'] = pd.qcut(posts[score_column], q=10, duplicates='drop')
+
+    # Select 10 from each quantile
+    selected_entries = posts.groupby('Quantile').apply(lambda group: group.head(10))
+
+    # Reset index
+    selected_entries.reset_index(drop=True, inplace=True)
 
     # Apply the styling function to the DataFrame
-    styled = combined_entries.style.apply(lambda row: ['background-color: {}'.format(interpolate_color(row[score_column], min_score, max_score))]*len(row), axis=1)
+    styled = selected_entries.style.apply(lambda row: ['background-color: {}'.format(interpolate_color(row[score_column], min_score, max_score))]*len(row), axis=1)
     # Write the styled DataFrame to an HTML file
     styled.to_html(f'{score_column}_scores.html')
 
@@ -212,6 +215,15 @@ def write_to_html_pairs(pairs, QA):
     df['Score'] = df.apply(lambda row: rank_QA_pair((row['post1'], row['post2'])) if QA else rank_RTE_pair((row['post1'], row['post2'])), axis=1)
     df.reset_index(drop=True, inplace=True)
     df['Score'] = pd.to_numeric(df['Score'], errors='coerce')
+
+    # Calculate quantiles
+    df['Quantile'] = pd.qcut(df['Score'], q=10, duplicates='drop')
+
+    # Select 10 from each quantile
+    df = df.groupby('Quantile').apply(lambda group: group.head(10))
+
+    # Reset index
+    df.reset_index(drop=True, inplace=True)
 
     # Determine color based on scores
     min_score = np.nanmin(df['Score'])
