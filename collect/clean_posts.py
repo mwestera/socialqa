@@ -57,7 +57,7 @@ def main(posts, autocorrect, html):
         for n_post, line in tqdm.tqdm(enumerate(posts), file=sys.stderr):
             post_entry = json.loads(line)
             clean_post_entry(post_entry, autocorrector, html=html)
-            print(json.dumps(post_entry))
+            json.dumps(post_entry)
     except KeyboardInterrupt:
         logging.warning('Keyboard interrupt!')
         pass
@@ -221,11 +221,15 @@ def iter_post_entry(post_entry, already_done=None):
     yield post_entry
 
     if submission := post_entry.get('submission'):
-        iter_post_entry(submission, already_done)
+        for p in iter_post_entry(submission, already_done):
+            yield p
     if parent := post_entry.get('parent'):
-        iter_post_entry(parent, already_done)
-    for reply in post_entry['replies']:
-        iter_post_entry(reply, already_done)
+        for p in iter_post_entry(parent, already_done):
+            yield p
+    if replies := post_entry.get('replies'):
+        for reply in replies:
+            for p in iter_post_entry(reply, already_done):
+                yield p
 
 
 if __name__ == '__main__':
