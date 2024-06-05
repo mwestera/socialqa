@@ -7,7 +7,11 @@ import string
 
 import tqdm
 
+#import hunspell
+#import neuspell  # hmm, remember to manually install torch==1.13.1, transformers==4.30.2
 import emoji
+
+import sacremoses
 
 import difflib
 htmldiff = difflib.HtmlDiff(wrapcolumn=80)
@@ -21,17 +25,18 @@ optionally applies a spellchecker.
 
 Example:
 
-$ cat collected/posts.jsonl | python clean_posts.py --autocorrect hunspell --html autocorrect_viz.html > collected/posts_cleaned.jsonl
+$ cat collected/posts.jsonl > python clean_posts.py --autocorrect hunspell --html autocorrect_viz.html > collected/posts_cleaned.jsonl
 
 """
 
+# TODO: clean_posts: veld 'text' toevoegen als vervanging voor selftext/body, wat in het geval van submissions ook de titel bevat.
+#    dat betekent dat extract_sentences gewoon van 'text' gebruik kan maken, en geen uitzonderingspositie geeft aan de titel.
 
 PUNCTUATION_PROPORTION_THRESHOLD = .1   # removes lines with more punctuation than this
-NUMERAL_PROPORTION_THRESHOLD = .2
 
 @click.command(help="Extract sentences from posts and their context. Prints each sentence as a json dictionary, storing "
                     "the text along with various meta-info.")
-@click.argument("posts", type=click.File('r'), default=sys.stdin)
+@click.argument("posts", type=str)
 @click.option("--autocorrect", help="Can choose between Hunspell (basic) and Neuspell (bert-based, slower); if omitted, no spellcheck is done.", type=click.Choice(['hunspell', 'neuspell'], case_sensitive=False), required=False, default=None)
 @click.option("--html", help="Path to html file, will be used to vizualize spellcheck corrections.", type=click.Path(), required=False, default=None)
 def main(posts, autocorrect, html):
@@ -52,12 +57,23 @@ def main(posts, autocorrect, html):
     else:
         logging.warning('Not doing autocorrect (use --autocorrect option if needed).')
         autocorrector = None
-
     try:
-        for n_post, line in tqdm.tqdm(enumerate(posts), file=sys.stderr):
-            post_entry = json.loads(line)
-            clean_post_entry(post_entry, autocorrector, html=html)
-            print(json.dumps(post_entry))
+        with open(posts, 'r') as f:
+            lines = f.readlines()
+        n_post = len(lines)
+
+        # Now you can use n_post in your logging statement
+        logging.info(f'Cleaned {n_post} posts to clean (inc. family).')
+        with open(posts, 'w') as f:
+            for line in tqdm.tqdm(lines):
+                post_entry = json.loads(line)
+                new_entry = clean_post_entry(post_entry, autocorrector, html=html)
+                f.write(json.dumps(new_entry) + '\n')
+    #try:
+    #    for n_post, line in tqdm.tqdm(enumerate(posts)):
+    #        post_entry = json.loads(line)
+    #        clean_post_entry(post_entry, autocorrector, html=html)
+    #        print(json.dumps(post_entry))
     except KeyboardInterrupt:
         logging.warning('Keyboard interrupt!')
         pass
@@ -65,8 +81,11 @@ def main(posts, autocorrect, html):
     if html and autocorrect:
         with open(html, 'a') as file:
             file.write('\n\n</body></html>')
-            logging.info(f'Html visualisation of spellchecker written to {html}')
+            logging.info(f'Html vizualisation of spellchecker written to {html}')
 
+    n_post = len(posts)
+
+    # Now you can use n_post in your logging statement
     logging.info(f'Cleaned {n_post} post entries (inc. family).')
 
 
@@ -75,9 +94,6 @@ def neuspell_autocorrect():
     Returns a function that takes a string and uses the Neuspell spellchecker
     and moses detokenizer for autocorrection.
     """
-    import neuspell  # hmm, remember to manually install torch==1.13.1, transformers==4.30.2
-    import sacremoses
-
     spellchecker = neuspell.BertChecker()
     spellchecker.from_pretrained()
     detokenizer = sacremoses.MosesDetokenizer('en').detokenize
@@ -94,8 +110,6 @@ def hunspell_autocorrect():
     """
     Returns a function that takes a string and uses the Hunspell spellchecker for autocorrection.
     """
-    import hunspell
-
     spellchecker = hunspell.HunSpell('/usr/share/hunspell/en_US.dic', '/usr/share/hunspell/en_US.aff')
     words_to_add = ['cybertruck',
                     'cybertrucks',
@@ -156,7 +170,6 @@ def clean(text: str, spellchecker=None, html=None) -> str:
     text = empty_md_url_regex.sub(r'<URL>', text)
     text = plain_url_regex.sub(r'<URL>', text)
     text = '\n'.join(line for line in text.split('\n') if line and proportion_punctuation(line) < PUNCTUATION_PROPORTION_THRESHOLD)
-    text = '\n'.join(line for line in text.split('\n') if line and proportion_numerals(line) < NUMERAL_PROPORTION_THRESHOLD)
     if not (text := text.strip()):
         return text
     # TODO Maybe remove lines starting with |
@@ -177,14 +190,6 @@ def proportion_punctuation(text):
     return sum(1 for c in text if c in string.punctuation) / len(text)
 
 
-def proportion_numerals(text):
-    """
-    Used in the main cleanup to remove overly punctuation-heavy lines.
-    """
-    return sum(c.isnumeric() for c in text) / len(text)
-
-
-
 def clean_post_entry(post_entry: dict, spellchecker, html=None):
     """
     Iterates over all the posts (submission, parent, replies, post itself) of a .jsonl post entry,
@@ -193,16 +198,15 @@ def clean_post_entry(post_entry: dict, spellchecker, html=None):
     for post in iter_post_entry(post_entry):
         text_key = 'selftext' if post['type'] == 'submission' else 'body'
         old_text = post[text_key]
+        if "LIVE UPDATES: Joseph Biden" in old_text:
+            print(old_text)
         clean_text = clean(old_text, spellchecker, html)
+        if old_text != clean_text:
+            logging.info(f"Text changed for post ID {post.get('id')}: {old_text} -> {clean_text}")
         post[text_key] = clean_text
-
-        # for convenience, store under 'text' key as well, in which case, for submissions, include the title in that field.
-        post['text'] = clean_text
-        if post['type'] == 'submission':
-            title = post['title'].strip()
-            if post['title'][-1] not in string.punctuation:
-                title += '.'
-            post['text'] = title + '\n' + post['text']
+        if "LIVE UPDATES: Joseph Biden" in clean_text:
+            print("The text contains a URL. 2")
+    return post_entry
 
 
 def iter_post_entry(post_entry, already_done=None):
