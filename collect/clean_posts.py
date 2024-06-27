@@ -57,7 +57,7 @@ def main(posts, autocorrect, html):
         for n_post, line in tqdm.tqdm(enumerate(posts), file=sys.stderr):
             post_entry = json.loads(line)
             clean_post_entry(post_entry, autocorrector, html=html)
-            json.dumps(post_entry)
+            print(json.dumps(post_entry))
     except KeyboardInterrupt:
         logging.warning('Keyboard interrupt!')
         pass
