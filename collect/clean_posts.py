@@ -31,7 +31,7 @@ NUMERAL_PROPORTION_THRESHOLD = .2
 
 @click.command(help="Extract sentences from posts and their context. Prints each sentence as a json dictionary, storing "
                     "the text along with various meta-info.")
-@click.argument("posts", type=click.File('r'), default=sys.stdin)
+@click.argument("posts", type=str)
 @click.option("--autocorrect", help="Can choose between Hunspell (basic) and Neuspell (bert-based, slower); if omitted, no spellcheck is done.", type=click.Choice(['hunspell', 'neuspell'], case_sensitive=False), required=False, default=None)
 @click.option("--html", help="Path to html file, will be used to vizualize spellcheck corrections.", type=click.Path(), required=False, default=None)
 def main(posts, autocorrect, html):
@@ -54,10 +54,14 @@ def main(posts, autocorrect, html):
         autocorrector = None
 
     try:
-        for n_post, line in tqdm.tqdm(enumerate(posts), file=sys.stderr):
-            post_entry = json.loads(line)
-            clean_post_entry(post_entry, autocorrector, html=html)
-            json.dumps(post_entry)
+        with open(posts, 'r') as f:
+            lines = f.readlines()
+
+        with open(posts, 'w') as f:
+            for line in tqdm.tqdm(lines):
+                post_entry = json.loads(line)
+                new_post = clean_post_entry(post_entry, autocorrector, html=html)
+                f.write(json.dumps(new_post) + '\n')
     except KeyboardInterrupt:
         logging.warning('Keyboard interrupt!')
         pass

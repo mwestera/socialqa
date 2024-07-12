@@ -34,15 +34,15 @@ NOTE: The metrics, scores etc. for filtering/selecting items are in the separate
 @click.command(help="")
 @click.argument("sentences", type=click.File('r'), default=sys.stdin)
 @click.argument("posts", type=click.File('r'), default=None)
-@click.option('--questions_frac', default=0.01, help='Fraction of questions to use.')
-@click.option('--pivots_frac', default=0.01, help='Fraction of pivots to use.')
-@click.option('--entailments_frac', default=0.01, help='Fraction of entailments to use.')
+@click.argument("post_file_name",type=str, default=sys.stdin)
+@click.option('--questions_frac', default=0.10, help='Fraction of questions to use.')
+@click.option('--pivots_frac', default=0.10, help='Fraction of pivots to use.')
+@click.option('--entailments_frac', default=0.10, help='Fraction of entailments to use.')
 @click.option("--n_qa", help="Max how many QA items per user.", type=int, required=False, is_flag=False, default=None)
 @click.option("--n_rte", help="Max how many RTE items per user.", type=int, required=False, is_flag=False, default=None)
 @click.option("--pdf", help="Path to pdf file to write report to.", type=click.Path(dir_okay=False), required=False, is_flag=False, default=None)
 @click.option("--seed", help="Random seed to use.", type=int, required=False, is_flag=False, default=None)
-
-def main(sentences, posts, questions_frac, pivots_frac, entailments_frac, n_qa, n_rte, pdf, seed):
+def main(sentences, posts, post_file_name, questions_frac, pivots_frac, entailments_frac, n_qa, n_rte, pdf, seed):
     """
     Main function for generating QA and RTE pairs.
 
@@ -66,10 +66,10 @@ def main(sentences, posts, questions_frac, pivots_frac, entailments_frac, n_qa, 
     random.seed(seed)
     logging.info(f'Seed: {seed}')
     # 
-    outfile_QA = f'pairs_qa.tsv'   # TODO: Make these cmd line args?
-    outfile_RTE = f'pairs_rte.tsv'
+    outfile_QA = f'pairs_qa_{post_file_name}.tsv'   # TODO: Make these cmd line args?
+    outfile_RTE = f'pairs_rte_{post_file_name}.tsv'
 
-    embeddings = get_embeddings('embeddings.csv')
+    embeddings = get_embeddings(f'{post_file_name}_embeddings.csv')
 
     report = PdfPages(pdf) if pdf else None
 
@@ -116,9 +116,9 @@ def main(sentences, posts, questions_frac, pivots_frac, entailments_frac, n_qa, 
     
     logging.info(f'Selected {len(pairs_QA)} QA pairs.')
 
-    calculate_similarity(pairs_QA, embeddings)
+    calculate_similarity(pairs_QA, embeddings, post_file_name+"_qa")
     pairs_QA = (sorted(pairs_QA, key=lambda pair: rank_QA_pair(pair)) if rank_QA_pair else pairs_QA)[:n_qa]
-
+    logging.info(f'Selected {len(pairs_QA)} QA pairs, after filter')
     write_to_html_pairs(pairs_QA, QA=True)
 
     logging.info('Composing RTE pairs.')
@@ -129,9 +129,9 @@ def main(sentences, posts, questions_frac, pivots_frac, entailments_frac, n_qa, 
                              filter=filter_RTE_pair,
                              ranker=rank_RTE_pair)
     logging.info(f'Selected {len(pairs_RTE)} RTE pairs.')
-    calculate_similarity(pairs_RTE, embeddings)
+    calculate_similarity(pairs_RTE, embeddings, post_file_name+"_rte")
     pairs_RTE = (sorted(pairs_RTE, key=lambda pair: rank_RTE_pair(pair)) if rank_RTE_pair else pairs_RTE)[:n_rte]
-
+    logging.info(f'Selected {len(pairs_RTE)} RTE pairs, after filter')
     write_to_html_pairs(pairs_RTE, QA=False)
     write_qa_pairs(pairs_QA, user_posts, outfile_QA)
     write_ent_pairs(pairs_RTE, outfile_RTE)
@@ -359,11 +359,11 @@ def select_pairs(df1,
         random.shuffle(pairs)
     return pairs
 
-def calculate_similarity(pairs, embeddings):
+def calculate_similarity(pairs, embeddings, post_file_name):
     """
     Calculate the cosine similarity between the embeddings of the sentences in the pairs.
     """
-    with open('similarities.tsv', 'w', newline='') as f:
+    with open(f'{post_file_name}_similarities.tsv', 'w', newline='') as f:
         writer = csv.writer(f, delimiter='\t')
         for pair in pairs:
             sent1_id = pair[0].id
@@ -511,6 +511,10 @@ def create_id_text_dict(posts):
             post_id = row['name']
             title = row.get("title", "")
             selftext = row.get("selftext", "")
+            if isinstance(title, (float, np.float64)) and np.isnan(title):
+              title = ""
+            if isinstance(selftext, (float, np.float64)) and np.isnan(selftext):
+              selftext = ""
             id_text_dict[post_id] = {
                 'text': title + " "+ selftext,
                 'start_end': len(title)+1
@@ -527,6 +531,10 @@ def create_id_text_dict(posts):
         if pd.notnull(submission):
             post_id = submission.get("name")
             title = submission.get("title", "")
+            if isinstance(title, (float, np.float64)) and np.isnan(title):
+              title = ""
+            if isinstance(selftext, (float, np.float64)) and np.isnan(selftext):
+              selftext = ""
             id_text_dict[post_id] = {
                 'text': title + " " + submission.get("selftext"),
                 'start_end': len(title)+1
@@ -547,6 +555,12 @@ def create_id_text_dict(posts):
                 }
 
         replies = row['replies']
+        if replies is None or (isinstance(replies, (float, np.float64)) and np.isnan(replies)):
+            replies = []
+        elif not isinstance(replies, list):
+            replies = []
+        
+        # If replies is a list and not empty, proceed
         if pd.notnull(replies).any():
             for reply in replies:
                 post_id=reply.get("id")
@@ -572,7 +586,7 @@ def write_pairs_to_list(pairs, outfile):
         for n, (pivot, post) in enumerate(pairs):
             tsv_writer.writerow([n, post.text, pivot.text])
 
-def write_ent_pairs(pairs, outfile):
+def write_ent_pairs(pairs,outfile):
     """
     Writes entailment pairs of sentences to a file in tsv format.
 
@@ -586,20 +600,25 @@ def write_ent_pairs(pairs, outfile):
     logging.info(f'Writing {len(pairs)} pairs to {outfile} in RTE format.')
     with open(outfile, 'w') as file:
         tsv_writer = csv.writer(file, delimiter='\t')
-        tsv_writer.writerow(['index','pivot_id', 'entailment_id','sentence1', 'sentence2'])
+        tsv_writer.writerow(['index','pivot_user_id','pivot_id', 'entailment_user_id', 'entailment_id','sentence1','post1', 'sentence2','post2'])
         def replace_last_punctuation(text):
             return re.sub(r'([.?!])[^.?!]*$', ',', text)
         
-        for n, (pivot, post) in enumerate(pairs):
-            new_post = post.text
+        for n, (pivot, ent) in enumerate(pairs):
+            new_post = ent.text
             new_pivot = pivot.text
             pivot_id = pivot.id
-            entailment_id = post.id
+            entailment_id = ent.id
+            post_id_1 = pivot.post_id
+            post_id_2 = ent.post_id
+            post_pivot_text = id_text_dict[post_id_1]['text']
+            post_ent_text = id_text_dict[post_id_2]['text']
+            pivot_user_id = pivot.user_post_author_id
+            entailment_user_id = ent.user_post_author_id
                 
-            prev_pivot = prev_pivot.replace('\n', ' ')
             new_pivot = new_pivot.replace('\n', ' ')
             new_post = new_post.replace('\n', ' ')
-            tsv_writer.writerow([n, pivot_id, entailment_id, new_pivot, new_post])
+            tsv_writer.writerow([n, pivot_user_id, pivot_id, entailment_user_id, entailment_id, new_pivot, post_pivot_text, new_post, post_ent_text])
 
 
 def write_qa_pairs(pairs, posts, outfile):
@@ -620,7 +639,7 @@ def write_qa_pairs(pairs, posts, outfile):
     logging.info(f'Writing {len(pairs)} pairs to {outfile} in tsv format.')
     with open(outfile, 'w', newline='') as file:
         tsv_writer = csv.writer(file, delimiter='\t')
-        tsv_writer.writerow(['index','question_id','pivot_id','post_id','question', 'post', 'pivot','pivot_positions'])
+        tsv_writer.writerow(['index','user_id_question','question_id','user_id_pivot','pivot_id','post_id','question', 'post', 'pivot','pivot_positions'])
         
         # Function to replace the last punctuation mark in a sentence with a comma
         def replace_last_punctuation(text):
@@ -632,6 +651,8 @@ def write_qa_pairs(pairs, posts, outfile):
             new_question = question.text
             post_id = pivot.post_id
             pivot_id = pivot.id
+            question_user_id = question.user_post_author_id
+            pivot_user_id = pivot.user_post_author_id
             post_text = id_text_dict[post_id]['text']
             
             question_id = question.id
@@ -643,7 +664,7 @@ def write_qa_pairs(pairs, posts, outfile):
             new_question = new_question.replace('\n', ' ')
             new_post = post_text.replace('\n', ' ')
             new_pivot = pivot.text.replace('\n', ' ')
-            tsv_writer.writerow([idx, question_id, pivot_id, post_id, new_question, new_post, new_pivot, (new_start, new_end)])
+            tsv_writer.writerow([idx, question_user_id, question_id, pivot_user_id, pivot_id, post_id, new_question, new_post, new_pivot, (new_start, new_end)])
 
 if __name__ == '__main__':
     main()
