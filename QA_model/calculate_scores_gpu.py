@@ -1,31 +1,36 @@
 import os
-os.environ['HF_HOME'] = '/home/s3382001/data1/'
 import csv
-import os
 import tqdm
-from transformers import AutoTokenizer, AutoModelForSequenceClassification,AutoModelForQuestionAnswering
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForSeq2SeqLM
-import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForQuestionAnswering, AutoModelForSeq2SeqLM
 import click
 import sys
 import torch
 import random
 import time
 import pandas as pd
+import numpy as np
 """
 Calculate scores for the input file using a QA or Entailment model.
 
 Example:
-$ python calculate_scores_cpu.py --model_type qa infile.tsv
+$ python calculate_scores_cpu.py infile.tsv --model_type qa --post_file posts_conservative_v1.jsonl
+--similarities_file_n_cont similarities_n_cont.tsv
+--similarities_file_cont similarities_file_cont.tsv
+--similarities_frac 0.10
 
 """
+# Sets environment where to load model, since LLM's are quite large
+os.environ['HF_HOME'] = '/home/s3382001/data1/'
+
 
 @click.command(help="")
 @click.argument("infile",type=str, default=sys.stdin)
 @click.argument("model_type", type=str)
-@click.argument("similarities_file", type=str, default=sys.stdin)
+@click.argument("post_file",type=str, default=sys.stdin)
+@click.argument("similarities_file_n_cont", type=str, default=sys.stdin)
+@click.argument("similarities_file_cont", type=str, default=sys.stdin)
 @click.argument("similarities_frac", type=str, default='0.10')
-def main(infile, model_type, similarities_file, similarities_frac):
+def main(infile, model_type,post_file,similarities_file_n_cont, similarities_file_cont, similarities_frac):
     """
     Main function for calculating scores.
 
@@ -37,7 +42,15 @@ def main(infile, model_type, similarities_file, similarities_frac):
     Returns:
         None
     """
-    threshold_value=get_top_percentage_threshold_approx(similarities_file, similarities_frac, model_type,sample_size=10000)
+    # Get threshold values for {similarities_frac}% of most similar embedding pairs
+    threshold_value_nc=get_top_percentage_threshold_approx(similarities_file_n_cont, similarities_frac, model_type,sample_size=10000)
+    threshold_value_c=get_top_percentage_threshold_approx(similarities_file_cont, similarities_frac, model_type,sample_size=10000)
+
+    # Plot results in html values and give qunatile samples.
+    create_html_with_threshold(infile, post_file, similarities_file_n_cont, similarities_file_cont , threshold_value_nc, model_type, contextual=False)
+    create_html_with_threshold(infile, post_file, similarities_file_n_cont, similarities_file_cont , threshold_value_c, model_type, contextual=True)
+
+    # Try using GPU, pass model to GPU
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Load the model and tokenizer based on the model type
     if model_type == "qa":
@@ -50,14 +63,11 @@ def main(infile, model_type, similarities_file, similarities_frac):
     elif model_type == "rte":
         model_1 = AutoModelForSeq2SeqLM.from_pretrained("google/t5_xxl_true_nli_mixture").to(device)
         tokenizer_1 = AutoTokenizer.from_pretrained("google/flan-t5-large")
-        #model_name_2 = "soumyasanyal/nli-entailment-verifier-xxl"
-        #model_2 = AutoModelForSeq2SeqLM.from_pretrained(model_name_2).to(device)
-        #tokenizer_2 = AutoTokenizer.from_pretrained('google/flan-t5-xxl')
         model_2=AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-large").to(device)
         tokenizer_2 = tokenizer_1
+        
     # Process and write scores
-    create_html_with_threshold(infile, similarities_file, threshold_value, model_type)
-    process_and_write_scores(infile, similarities_file,tokenizer_1, model_1, tokenizer_2, model_2, model_type, threshold_value)
+    #process_and_write_scores(infile, similarities_file,tokenizer_1, model_1, tokenizer_2, model_2, model_type, threshold_value)
 
 def process_and_write_scores(infile,sim_file, tokenizer_1, model_1, tokenizer_2, model_2, model_type, threshold_value, chunk_size=1):
     """
@@ -82,96 +92,137 @@ def process_and_write_scores(infile,sim_file, tokenizer_1, model_1, tokenizer_2,
         batch_qas=[]
         for row in tqdm.tqdm(tsv_reader):
             # Check if the index is a string and convert it to an integer else it will not be processed
-            if(type(row["index"])==str):
+            if type(row["index"])==str:
                 try:
                     row["index"]=int(row["index"])
                 except:
                     print("index is not a integer", flush=True)
                     continue
+                
             # If the model type is QA
-            if model_type=="qa":
+            if model_type == "qa":
                 qa_list = eval(row['pivot_positions'])  # Convert the string representation of the list to an actual list                  
-                if(qa_list[0]>1000):
+
+                # Pivot outside first 1000 characters
+                if qa_list[0]>1000:
+
+                    # If context is too large only pass 400 characters
                     new_post, new_qa_list = reduce_context_size(400, qa_list, row)
+                    
                     question = row['question']
                     post = new_post
                     pivot = row['pivot']
+                    
                     #Find similarity score here
                     score_sim = get_similarity(sim_file, row["question_id"], row["pivot_id"], model_type)
-                    print(score_sim, flush=True)
+
+                    # Embedding similarity does not pass threshold
                     if score_sim<threshold_value:
                       row['score flan-t5'] = 0
                       row['score albert'] = 0
                       row['best answer albert'] = "Not Similar"
                       writer.writerow(row)
+
+                    # Embedding similarity does pass threshold
                     else:
                       batch_texts.append((question, post, pivot))
                       batch_qas.append(new_qa_list)
                       batch_rows.append(row)
+                      
+                # With pivot in first 1000 characters
                 else:
                     question = row['question']
                     pivot = row['pivot']
                     post = row['post']
                     #Find similarity score here
                     score_sim = get_similarity(sim_file, row["question_id"], row["pivot_id"], model_type)
-                    print(score_sim, flush=True)
+
+                    # Embedding similarity does not pass threshold
                     if  score_sim<threshold_value:
+
+                      #Write to file
                       row['score flan-t5'] = 0
                       row['score albert'] = 0
                       row['best answer albert'] = "Not Similar"
                       writer.writerow(row)
-
+                      
+                    # Embedding similarity does pass threshold
                     else:
+                      # Store results
                       batch_texts.append((question, post, pivot))
                       batch_rows.append(row)
                       batch_qas.append(qa_list)
 
             # If the model type is Entailment
             elif model_type  == 'rte':
+                
                 sentence1 = row['sentence1']
                 sentence2 = row['sentence2']
                 score_sim = get_similarity(sim_file, row["pivot_id"], row["entailment_id"], model_type)
-                #Find similarity score here
+                
+                # Embedding similarity does not pass threshold
                 if score_sim<threshold_value:
                   row['score nli-entailment-verifier-xxl'] = 0
                   row['score flan-t5'] = 0 
                   writer.writerow(row)
+
+                # Embedding similarity does pass threshold
                 else:
+                  # Store results
                   batch_texts.append((sentence1, sentence2))
                   batch_rows.append(row)
+
+            # Process accepted pairs in batches (chunk size)
             if len(batch_texts) >= chunk_size:
+                
                 if model_type=='qa':
+
+                    # Model tests for Albert and LLM, if one is preferred over the other save time by deleting code for the other
                     scores_flan, scores_alb, answers_alb = model_predict_qa([texts[0] for texts in batch_texts], [texts[1] for texts in batch_texts], [texts[2] for texts in batch_texts], batch_qas, tokenizer_1, model_1, tokenizer_2, model_2)
+
                     for idx,(row, score) in enumerate(zip(batch_rows, scores_flan)):
-                        print("enter potential target", flush=True)
+                        # Write to file
                         row['score flan-t5'] = scores_flan[idx]
                         row['score albert'] = scores_alb[idx]
                         row['best answer albert'] = answers_alb[idx]
                         writer.writerow(row)
+                        
                 else:
+                    # Model is tested for two LLM's, if one is preferred over the other save time by deleting code for the other
                     scores_nli,  scores_flan = model_predict_rte([texts[0] for texts in batch_texts], [texts[1] for texts in batch_texts], tokenizer_1, model_1, tokenizer_2, model_2)
+
                     for idx,(row, score) in enumerate(zip(batch_rows, scores_nli)):
-                        print("enter potential target", flush=True)
+                        # Write to file
                         row['score nli-entailment-verifier-xxl'] = scores_nli[idx]
                         row['score flan-t5'] = scores_flan[idx]
                         writer.writerow(row)
+                        
                 batch_rows, batch_texts, batch_qas= [], [], []  # Reset for next batch
-
+                
+        # Last batch does not have to meet batch size
         if batch_rows:
+            
             if model_type =='qa':
+                
                 scores_flan, scores_alb, answers_alb = model_predict_qa([texts[0] for texts in batch_texts], [texts[1] for texts in batch_texts], [texts[2] for texts in batch_texts], batch_qas, tokenizer_1, model_1, tokenizer_2, model_2)
+
                 for idx,(row, score) in enumerate(zip(batch_rows, scores_alb)):
+                    # Write to file
                     row['score flan-t5'] = scores_flan[idx]
                     row['score albert'] = scores_alb[idx]
                     row['best answer albert'] = answers_alb[idx]
                     writer.writerow(row)
             else:
+
                 scores_nli, scores_flan = model_predict_rte([texts[0] for texts in batch_texts], [texts[1] for texts in batch_texts], tokenizer_1, model_1, tokenizer_2, model_2)
+
                 for idx,(row, score) in enumerate(zip(batch_rows, scores_nli)):
+                    # Write to file
                     row['score nli-entailment-verifier-xxl'] = scores_nli[idx]
                     row['score flan-t5'] = scores_flan[idx]
                     writer.writerow(row)
-def subsample_from_quantiles(file_path, num_quantiles, sample_size_per_quantile):
+                    
+def subsample_from_quantiles(file_path,file_path_2, num_quantiles, sample_size_per_quantile):
     """
     Takes a subsample from each quantile of the 'similarity' column in the file.
 
@@ -186,24 +237,127 @@ def subsample_from_quantiles(file_path, num_quantiles, sample_size_per_quantile)
 
     # Read the data in chunks
     all_data = []
-    for chunk in pd.read_csv(file_path, sep='\t', header=None, names=['id1', 'id2', 'similarity'], chunksize=10000):
+    for chunk in pd.read_csv(file_path, sep='\t', header=None, names=['post1_id', 'post2_id','id1', 'id2', 'similarity_1'], chunksize=10000):
         all_data.append(chunk)
 
     # Concatenate the chunks into a single DataFrame
     all_data = pd.concat(all_data, ignore_index=True)
 
     # Calculate quantile boundaries
-    quantile_bins = pd.qcut(all_data['similarity'], q=num_quantiles, labels=False)
+    quantile_bins = pd.qcut(all_data['similarity_1'], q=num_quantiles, labels=False)
 
     # Subsample from each quantile
     subsamples = []
     for quantile in range(num_quantiles):
         quantile_data = all_data[quantile_bins == quantile]
-        subsample = quantile_data.sample(n=min(sample_size_per_quantile, len(quantile_data)))
-        subsamples.append(subsample)
+        if len(quantile_data) > 0:
+            # Sort the quantile data by similarity_1
+            quantile_data_sorted = quantile_data.sort_values(by='similarity_1')
+            
+            # Take the best 10 samples (highest similarity)
+            best_samples = quantile_data_sorted.tail(sample_size_per_quantile)
+            
+            # Take the worst 10 samples (lowest similarity)
+            worst_samples = quantile_data_sorted.head(sample_size_per_quantile)
+            
+            # Combine best and worst samples
+            combined_samples = pd.concat([best_samples, worst_samples])
+            subsamples.append(combined_samples)
+    subsampled_data = pd.concat(subsamples, ignore_index=True)
+    additional_data = pd.read_csv(file_path_2, sep='\t', header=None, names=['post1_id', 'post2_id','id1', 'id2', 'similarity_2'])
+    # Merge the subsampled data with the additional data on id1 and id2 using a left join
+    combined_data = pd.merge(subsampled_data, additional_data, on=['id1', 'id2'], how='left', suffixes=('', '_y'))
 
+    # Drop the duplicated post1_id and post2_id columns from the right DataFrame
+    combined_data = combined_data.drop(['post1_id_y', 'post2_id_y'], axis=1)
     # Concatenate the subsamples
-    return pd.concat(subsamples, ignore_index=True)
+    return combined_data
+
+def read_posts(posts_file):
+    """
+    Read the posts from the file and return them as a DataFrame.
+    """
+    df = pd.read_json(posts_file, lines=True)
+    df['created'] = pd.to_datetime(df['created'])
+
+    # for convenience:
+    df['user_post_author_id'] = df['author_id']
+    df['text'] = df['selftext']
+    df['text'] = df['text'].fillna(df['body'])
+
+    df['text'] = df['text'].replace(to_replace=r'\s+', value=r' ', regex=True)  # TODO: Or do we want to keep newlines for splitting?
+
+    return df
+
+
+def get_post_dict(posts):
+    """
+    Code returns a dict where the post's text can be retrieved from the id key.
+    Args:
+       posts : posts file
+    Returns:
+       dict: dictionary with text (value) for id (key)
+    """
+    id_text_dict = {}
+    for _, row in posts.iterrows():
+        post_id = row['id']
+        if row['type'] == 'submission':
+            post_id = row['name']
+            title = row.get("title", "")
+            selftext = row.get("selftext", "")
+            if isinstance(title, (float, np.float64)) and np.isnan(title):
+              title = ""
+            if isinstance(selftext, (float, np.float64)) and np.isnan(selftext):
+              selftext = ""
+            id_text_dict[post_id] = {
+                'text': title + " "+ selftext,
+                'start_end': len(title)+1}
+        elif row['type'] == 'comment':
+            post_id = row['id']
+            body = row.get("body", "")
+            id_text_dict[post_id] = {
+                'text': body,
+                'start_end': 0}
+        submission = row['submission']
+        if pd.notnull(submission):
+            post_id = submission.get("name")
+            title = submission.get("title", "")
+            if isinstance(title, (float, np.float64)) and np.isnan(title):
+              title = ""
+            if isinstance(selftext, (float, np.float64)) and np.isnan(selftext):
+              selftext = ""
+            id_text_dict[post_id] = {
+                'text': title + " " + submission.get("selftext"),
+                'start_end': len(title)+1
+            }
+        parent = row['parent']
+        if pd.notnull(parent):
+            post_id = parent.get("id","")
+            selftext= parent.get("selftext","")
+            title = parent.get("title", "")
+            if parent.get("type") == "submission":
+                id_text_dict[post_id] = {
+                    'text': title + " "+ selftext,
+                    'start_end': len(title)+1
+                }
+            elif parent.get("type") == "comment":
+                id_text_dict[post_id] = {
+                    'text': parent.get("body"),
+                    'start_end': 0}
+        replies = row['replies']
+        if replies is None or (isinstance(replies, (float, np.float64)) and np.isnan(replies)):
+            replies = []
+        elif not isinstance(replies, list):
+            replies = []
+        # If replies is a list and not empty, proceed
+        if pd.notnull(replies).any():
+            for reply in replies:
+                post_id=reply.get("id")
+                id_text_dict[post_id] = {
+                    'text': reply.get("body"),
+                    'start_end': 0
+                }    
+    return id_text_dict
 
 def find_sentences_for_ids(pairs_file, id1, id2, model_type):
     """
@@ -244,7 +398,7 @@ def find_sentences_for_ids(pairs_file, id1, id2, model_type):
                 break
     return sentence1, sentence2
     
-def create_html_with_threshold(pairs_file, sim_file, threshold_value, model_type, num_quantiles=10, sample_size_per_quantile=20):
+def create_html_with_threshold(pairs_file,posts_file, sim_file_nc, sim_file_c, threshold_value, model_type, num_quantiles=10, sample_size_per_quantile=20, contextual=False):
     """
     Creates an HTML file showing subsampled data from each quantile with colors.
 
@@ -254,32 +408,41 @@ def create_html_with_threshold(pairs_file, sim_file, threshold_value, model_type
         sample_size_per_quantile (int): Number of samples to take from each quantile.
         output_file (str): Path to the output HTML file.
     """
-
-    subsampled_data = subsample_from_quantiles(sim_file, num_quantiles, sample_size_per_quantile)
-
+    if contextual:
+      sim_file_scores =sim_file_c
+      sim_file_add = sim_file_nc
+    else:
+      sim_file_add =sim_file_c
+      sim_file_scores = sim_file_nc 
+    subsampled_data = subsample_from_quantiles(sim_file_scores, sim_file_add, num_quantiles, sample_size_per_quantile)
     # Generate a color palette for the quantiles
     import colorsys
     colors = [colorsys.hsv_to_rgb(i / num_quantiles, 0.8, 0.8) for i in range(num_quantiles)]
     colors = ['#%02x%02x%02x' % (int(r * 255), int(g * 255), int(b * 255)) for r, g, b in colors]
-    output_file = sim_file.replace('.tsv', f'_{model_type}_sample.html')
+    output_file = sim_file_scores.replace('.tsv', f'c:{contextual}_{model_type}_sample.html')
+    posts = read_posts(posts_file)
+    posts_dict = get_post_dict(posts)
 
     with open(output_file, 'w') as f:
         f.write('<html><body><table border="1">\n')
-        f.write('<tr><th>Sentence 1</th><th>Sentence 2</th><th>Similarity</th><th>Quantile</th></tr>\n')
+        f.write('<tr><th>Sentence 1</th><th>Sentence 2</th><th>Post 1</th><th>Post 2</th><th>Similarity Contextual</th><th>Similarity Non Contextual</th><th>Quantile</th></tr>\n')
 
         # Calculate quantile bins for the subsampled data
-        quantile_bins_subsampled = pd.qcut(subsampled_data['similarity'], q=num_quantiles, labels=False)
+        quantile_bins_subsampled = pd.qcut(subsampled_data['similarity_1'], q=num_quantiles, labels=False)
 
         for _, row in subsampled_data.iterrows():
             quantile = quantile_bins_subsampled.loc[row.name]
-            color = 'green' if row["similarity"] >= threshold_value else 'red'
+            color = 'green' if row["similarity_1"] >= threshold_value else 'red'
             sentence1, sentence2 = find_sentences_for_ids(pairs_file, row['id1'], row['id2'], model_type)
-            f.write(f'<tr style="background-color: {color}"><td>{sentence1}</td><td>{sentence2}</td><td>{row["similarity"]}</td><td>{quantile}</td></tr>\n')
+            post1_id, post2_id  = row['post1_id'], row['post2_id']
+            post1 = posts_dict[post1_id]['text']
+            post2 = posts_dict[post2_id]['text']
+            f.write(f'<tr style="background-color: {color}"><td>{sentence1}</td><td>{sentence2}</td><td>{post1}</td><td>{post2}</td><td>{row["similarity_1"]}</td><td>{row["similarity_2"]}</td><td>{quantile}</td></tr>\n')
 
 def get_similarity(file_path, id1, id2, model_type):
     chunk_size = 10000  # Read file in chunks of 10000 lines
-        # Perform reservoir sampling to get a sample of the similarity values
-    sample_chunk = pd.read_csv(file_path, sep='\t', header=None, names=['id1', 'id2', 'similarity'], nrows=10)
+    # Perform reservoir sampling to get a sample of the similarity values
+    sample_chunk = pd.read_csv(file_path, sep='\t', header=None, names=['post1_id','post2_id','id1', 'id2', 'similarity'], nrows=10)
     
     # Determine the types of 'id1' and 'id2' columns
     id1_type = sample_chunk['id1'].dtype
@@ -288,7 +451,7 @@ def get_similarity(file_path, id1, id2, model_type):
     # Convert the input IDs to the same type
     id1_converted = id1_type.type(id1)
     id2_converted = id2_type.type(id2)    
-    for chunk in pd.read_csv(file_path, sep='\t', header=None, names=['id1', 'id2', 'similarity'], chunksize=chunk_size):
+    for chunk in pd.read_csv(file_path, sep='\t', header=None, names=['post1_id','post2_id','id1', 'id2', 'similarity'], chunksize=chunk_size):
         # Search for the pair of IDs in the current chunk
         match = chunk[(chunk['id1'] == id1_converted) & (chunk['id2'] == id2_converted)]
         match_reverse = chunk[(chunk['id1'] == id2_converted) & (chunk['id2'] == id1_converted)] 
@@ -300,10 +463,13 @@ def get_similarity(file_path, id1, id2, model_type):
     return None  # Return None if the pair is not found
 
 def reservoir_sampling(file_path, sample_size):
+    """
+    Samples similarities to make a rough estimate on the similarity threshold
+    """
     sample = []
     chunk_size = 10000  # Read file in chunks of 10000 lines
 
-    for chunk in pd.read_csv(file_path, sep='\t', header=None, names=['id1', 'id2', 'similarity'], chunksize=chunk_size):
+    for chunk in pd.read_csv(file_path, sep='\t', header=None, names=['post1_id','post2_id','id1', 'id2', 'similarity'], chunksize=chunk_size):
         for index, row in chunk.iterrows():
             if len(sample) < sample_size:
                 sample.append(row['similarity'])
@@ -316,6 +482,9 @@ def reservoir_sampling(file_path, sample_size):
     return sample
 
 def get_top_percentage_threshold_approx(file_path, percentage,model_type, sample_size=10000):
+    """
+    Calculates threshold at top 1-{percetage}% mark
+    """
     # Perform reservoir sampling to get a sample of the similarity values
     sample = reservoir_sampling(file_path, sample_size)    
 
@@ -331,14 +500,14 @@ def get_top_percentage_threshold_approx(file_path, percentage,model_type, sample
     return float(threshold_value)
 
 def reduce_context_size(context_start, qa_list, row):
-        """
-        Reduces the context size of the post and updates the QA list accordingly.
-        """
-        post = row['post']
-        post= post[qa_list[0]-context_start:]
-        qa_list = (context_start, context_start+ (qa_list[1]-qa_list[0]))
+    """
+    Reduces the context size of the post and updates the QA list accordingly.
+    """
+    post = row['post']
+    post= post[qa_list[0]-context_start:]
+    qa_list = (context_start, context_start+ (qa_list[1]-qa_list[0]))
 
-        return post, qa_list
+    return post, qa_list
 
 def model_predict_rte(premises, hypotheses, tokenizer_1, model_1, tokenizer_2, model_2):
     """
@@ -348,10 +517,14 @@ def model_predict_rte(premises, hypotheses, tokenizer_1, model_1, tokenizer_2, m
     scores_nli = []
     scores_flan = []
     for premise, hypothesis in zip(premises, hypotheses):
+
+        # Prompt as specificied in huggingface for this model
         prompt = f"premise: {premise} hypothesis: {hypothesis}"
         input_ids = tokenizer_2(prompt, return_tensors='pt').input_ids.to(model_2.device)
         
         with torch.no_grad():
+            
+            # Output of model from prompt should be either 1 or 0 and sum up to 1.
             pos_ids = tokenizer_2('1').input_ids
             neg_ids = tokenizer_2('0').input_ids
             pos_id = pos_ids[0]
@@ -364,9 +537,10 @@ def model_predict_rte(premises, hypotheses, tokenizer_1, model_1, tokenizer_2, m
             score_ent = torch.nn.functional.softmax(posneg_logits, dim=1)[:, 0]
 
         scores_nli.append(score_ent.item())
+        
         with torch.inference_mode():
-            output = self.model.generate(input_ids, max_new_tokens=10)
-        result = self.tokenizer.decode(output[0], skip_special_tokens=True)
+            output = model_1.generate(input_ids, max_new_tokens=10)
+        result = tokenizer_2.decode(output[0], skip_special_tokens=True)
 
         if len(result) > 1:
             result = result[0]
@@ -375,19 +549,10 @@ def model_predict_rte(premises, hypotheses, tokenizer_1, model_1, tokenizer_2, m
         scores_flan.append(result)
     return scores_nli, scores_flan
 
-
-
-def find_best_token_index(predictions, input_ids, tokenizer, skip_tokens):
-
-    sorted_indices = torch.argsort(predictions, descending=True)
-    for idx in sorted_indices[0]:
-        token_ids = input_ids[idx].unsqueeze(0) 
-        token = tokenizer.convert_ids_to_tokens(token_ids)[0]
-        if token not in skip_tokens:
-            return idx.item(), predictions[0, idx].item()
-    return None, None
-
 def find_sublist_in_list(big_list, sublist):
+    """
+    Look for overlapping tokens between pivot and text
+    """
     sublist_length = len(sublist)
     for i in range(len(big_list)):
         if big_list[i:i+sublist_length] == sublist:
@@ -395,6 +560,9 @@ def find_sublist_in_list(big_list, sublist):
     return -1
 
 def find_pivot(tokenizer, pivot, input_ids):
+    """
+    Finds tokens of pivot within context
+    """
     # Encode the pivot
     encoded_pivot = tokenizer.encode(pivot)[1:-1]  # Ignore the first and last token
 
@@ -426,8 +594,9 @@ def model_predict_qa(questions, posts, pivots, qa_lists, tokenizer_1, model_1, t
     """
 
     # Tokenize batch of questions and contexts
-        # Tokenize batch of questions and contexts for both models
     inputs2 = tokenizer_2(questions, posts, padding=True, truncation=True, return_tensors="pt", max_length=512)
+
+    # Pass to GPU
     inputs2 = {k: v.to(model_2.device) for k, v in inputs2.items()}  # Move to device
 
     # Perform prediction for model2
@@ -439,6 +608,7 @@ def model_predict_qa(questions, posts, pivots, qa_lists, tokenizer_1, model_1, t
     probabilities_flan = []
     probabilities_alb = []
     best_answers_alb = []
+    
     # Process each question-context pair in the batch
     for idx, input_ids in enumerate(inputs2['input_ids']):
         # Create a new inputs dictionary that contains only the current elemen
@@ -446,6 +616,7 @@ def model_predict_qa(questions, posts, pivots, qa_lists, tokenizer_1, model_1, t
         # Call find_pivot with the current inputs
         start_token, end_token = find_pivot(tokenizer_2, pivots[idx], input_ids)
 
+        # Pivot not found in text
         if start_token == -1:
             probabilities_alb.append(0)
             best_answers_alb.append("")
@@ -454,8 +625,10 @@ def model_predict_qa(questions, posts, pivots, qa_lists, tokenizer_1, model_1, t
         max_average_prob = 0
         best_start, best_end = -1, -1
 
+        # Get most probable answer
         for i in range(start_token, end_token +1):
             for j in range(i, end_token + 1):
+                
                 average_prob = (predictions_start2[idx, i] + predictions_end2[idx, j]) / 2 
                 if average_prob > max_average_prob:
                     max_average_prob = average_prob
@@ -465,13 +638,17 @@ def model_predict_qa(questions, posts, pivots, qa_lists, tokenizer_1, model_1, t
         probabilities_alb.append(max_average_prob.item())
         input_sequence = tokenizer_2.decode(input_ids[best_start:best_end+1])
         best_answers_alb.append(input_sequence)
+        
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # This code tries QA using an LLM, if one wants to test a model, otherwise delete code
     for idx, (question,answer) in enumerate(zip(questions,pivots)):
         # Create a new inputs dictionary that contains only the current elemen
 
         # Call find_pivot with the current inputs
         prompt = f"Question: {question}\nAnswer: {answer}\nDoes this answer correctly respond to the question?\nAnswer:"
         input_ids = tokenizer_1(prompt, return_tensors='pt').input_ids.to(device)
+        
         with torch.no_grad():
             pos_ids = tokenizer_1('Yes', return_tensors='pt').input_ids.to(device)
             neg_ids = tokenizer_1('No', return_tensors='pt').input_ids.to(device)
@@ -484,6 +661,7 @@ def model_predict_qa(questions, posts, pivots, qa_lists, tokenizer_1, model_1, t
             posneg_logits = torch.cat([pos_logits.unsqueeze(-1), neg_logits.unsqueeze(-1)], dim=1)
             scores_qa = torch.nn.functional.softmax(posneg_logits, dim=1)[:, 0]
         probabilities_flan.append(scores_qa.item())
+        
     return probabilities_flan, probabilities_alb, best_answers_alb
 
 if __name__ == "__main__":

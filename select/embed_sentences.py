@@ -1,44 +1,54 @@
 from sentence_transformers import SentenceTransformer
-from transformers import pipeline
-
 import logging
 import sys
 import click
 import json
-
+import os
 import csv
+import json
+import logging
+import sys
+import click
+import json
+import os
+import csv
+import jsonlines
+import tqdm
+import torch
+from sentence_transformers import SentenceTransformer
 
-"""
-Compute embeddings for sentences.jsonl, writing them to a separate .csv file based on sentence id.
-
-Example:
-
-$ cat collected/sentences_conspiracy.jsonl | python embed_sentences.py > collected/sentences_conspiracy_embs.csv
-"""
-
-
-@click.command(help="Compute embeddings for sentences jsonl, outputting them in .csv format.")
-@click.argument("sentences", type=click.File('r'), default=sys.stdin)
-def main(sentences):
-
+@click.command(help="Add information to sentences.jsonl, namely subjectivity and abstractness.")
+@click.argument("sentences", type=click.Path(), required=True, default='None')
+@click.argument("post_file_name",type=str, default=sys.stdin)
+def main(sentences, post_file_name):
     logging.basicConfig(level=logging.INFO)
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logging.info(f"Using device: {device}")
 
-    # 384 dimensional; there seems to be no lower-dim model: https://www.sbert.net/docs/pretrained_models.html
-    model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
-
-    writer = csv.writer(sys.stdout)
-
-    n = 0
-
-    for line in sentences:
-        sentence = json.loads(line)
-        id, text = sentence['id'], sentence['text']
-        emb = model.encode(text, show_progress_bar=False)
-        writer.writerow([id, *emb])
-        n += 1
-
-    logging.info(f'Computed {n} embeddings.')
+    # Initialize the SentenceTransformer model on the specified device
+    model = SentenceTransformer('paraphrase-MiniLM-L6-v2', device=device)
+    ids = []
+    texts = []
+    with open('config.json', 'r') as config_file:
+        config = json.load(config_file)
+        embeddings_file = config['dir'] + f"/{post_file_name}_embeddings.csv"
+    # Remove the file extension and add the new suffix
 
 
+    # Read and parse each line of sentences
+    with jsonlines.open(sentences) as reader:
+        for n, sentence in enumerate(tqdm.tqdm(reader)): 
+            id, text = sentence['id'], sentence['text']
+            texts.append(text)
+            id.append(ids)
+
+    # Open a file to write the embeddings
+    with open(embeddings_file, 'w', newline='') as file:
+        writer = csv.writer(file)
+
+        # Encode texts to embeddings and write each as a row in the file
+        for idx, (id, emb) in enumerate(zip(ids, model.encode(texts, show_progress_bar=True))):
+            writer.writerow([id, *emb])
 if __name__ == '__main__':
     main()

@@ -76,12 +76,15 @@ sentence_regex = re.compile(r'([A-Z][^.!?]*[.!?]+)', re.M)
 
 
 def extract_sentences_from_post(user_post: dict, nlp: Optional[spacy.Language] = None) -> Iterator[dict]:
-    post_info_to_save = {
+    try:
+      post_info_to_save = {
         'user_post_id': user_post['id'],
         'user_post_author_id': user_post['author_id'],
         'subreddit_name': user_post['subreddit_name'],
         'user_post_created': user_post['created'],
-    }
+      }
+    except KeyError:
+      return
 
     total_sentences = 1
     extracted_sentences = 1

@@ -3,7 +3,7 @@ import click
 import random
 import itertools
 import csv
-
+import ast
 import pandas as pd
 import numpy as np
 
@@ -65,12 +65,12 @@ def main(sentences, posts, post_file_name, questions_frac, pivots_frac, entailme
     seed = seed or random.randint(0, 999999)
     random.seed(seed)
     logging.info(f'Seed: {seed}')
-    # 
+    
     outfile_QA = f'pairs_qa_{post_file_name}.tsv'   # TODO: Make these cmd line args?
     outfile_RTE = f'pairs_rte_{post_file_name}.tsv'
 
-    embeddings = get_embeddings(f'{post_file_name}_embeddings.csv')
-
+    embeddings_nc = get_embeddings(f'{post_file_name}_embeddings.csv')
+    embeddings_c = get_embeddings(f'{post_file_name}_posts_embeddings.tsv')
     report = PdfPages(pdf) if pdf else None
 
     all_sentences = read_sentences(sentences)
@@ -86,10 +86,6 @@ def main(sentences, posts, post_file_name, questions_frac, pivots_frac, entailme
     write_to_html(questions, 'question_score')
     write_to_html(pivots, 'pivot_score')
     write_to_html(entailments, 'pivot_score')
-
-    # Pre-filter by time? Not super useful.
-    # potential_pivots = extract_sorted_subrange_by(potential_pivots, group_by='user_post_author_id', sort_by='user_post_created', between=[.25, .75])
-    # potential_questions = extract_sorted_subrange_by(potential_questions, group_by='user_post_author_id', sort_by='user_post_created', between=[0, .75])
 
     estimate_exhaustive_task_sizes(questions, pivots, entailments)
 
@@ -116,8 +112,11 @@ def main(sentences, posts, post_file_name, questions_frac, pivots_frac, entailme
     
     logging.info(f'Selected {len(pairs_QA)} QA pairs.')
 
-    calculate_similarity(pairs_QA, embeddings, post_file_name+"_qa")
+    calculate_similarity(pairs_QA, embeddings_nc, post_file_name+"_nc_qa", include_posts=True)
+    calculate_similarity(pairs_QA, embeddings_c, post_file_name+"_c_qa", include_posts=True)
+
     pairs_QA = (sorted(pairs_QA, key=lambda pair: rank_QA_pair(pair)) if rank_QA_pair else pairs_QA)[:n_qa]
+
     logging.info(f'Selected {len(pairs_QA)} QA pairs, after filter')
     write_to_html_pairs(pairs_QA, QA=True)
 
@@ -129,12 +128,18 @@ def main(sentences, posts, post_file_name, questions_frac, pivots_frac, entailme
                              filter=filter_RTE_pair,
                              ranker=rank_RTE_pair)
     logging.info(f'Selected {len(pairs_RTE)} RTE pairs.')
-    calculate_similarity(pairs_RTE, embeddings, post_file_name+"_rte")
+
+    calculate_similarity(pairs_RTE, embeddings_nc, post_file_name+"_nc_rte", include_posts=True)
+    calculate_similarity(pairs_RTE, embeddings_c, post_file_name+"_c_rte", include_posts=True)
+
     pairs_RTE = (sorted(pairs_RTE, key=lambda pair: rank_RTE_pair(pair)) if rank_RTE_pair else pairs_RTE)[:n_rte]
+
     logging.info(f'Selected {len(pairs_RTE)} RTE pairs, after filter')
+
+    # Write to files
     write_to_html_pairs(pairs_RTE, QA=False)
     write_qa_pairs(pairs_QA, user_posts, outfile_QA)
-    write_ent_pairs(pairs_RTE, outfile_RTE)
+    write_ent_pairs(pairs_RTE,user_posts, outfile_RTE)
 
     # Interpolate between red and green
 def interpolate_color(score, min_val, max_val):
@@ -359,7 +364,7 @@ def select_pairs(df1,
         random.shuffle(pairs)
     return pairs
 
-def calculate_similarity(pairs, embeddings, post_file_name):
+def calculate_similarity(pairs, embeddings, post_file_name, include_posts=True):
     """
     Calculate the cosine similarity between the embeddings of the sentences in the pairs.
     """
@@ -368,13 +373,17 @@ def calculate_similarity(pairs, embeddings, post_file_name):
         for pair in pairs:
             sent1_id = pair[0].id
             sent2_id = pair[1].id
-
+            post1_id = pair[0].post_id
+            post2_id = pair[1].post_id
             sent1_embedding = embeddings.get(sent1_id)
             sent2_embedding = embeddings.get(sent2_id)
 
             if sent1_embedding is not None and sent2_embedding is not None:
                 similarity = 1 - paired_cosine_distances([sent1_embedding], [sent2_embedding])[0]
-                writer.writerow([sent1_id, sent2_id, similarity])
+                if include_posts:
+                  writer.writerow([post1_id, post2_id, sent1_id, sent2_id, similarity])
+                else:
+                  writer.writerow([sent1_id, sent2_id, similarity])
     return 
 
 def get_embeddings(file_path):
@@ -387,8 +396,20 @@ def get_embeddings(file_path):
         header = next(reader)  # Skip the header
         for row in reader:
             post_id = row[0]
-            embedding = np.array([float(value) for value in row[1:]], dtype=float)
-            embeddings[post_id] = embedding
+            embedding = []
+            if isinstance(row[1], str) and row[1].startswith('[') and row[1].endswith(']'):
+                    # Parse string-encoded list
+               try:
+                 parsed_list = ast.literal_eval(row[1])
+                    # If value is a list, flatten it and add to embedding
+                 embedding.extend([float(v) for v in parsed_list])
+               except ValueError as e:
+                  logging.error(f'ValueError: {e} for row: {row}')
+                  continue
+            else:
+                    # Otherwise, add the single float value to embedding
+               embedding = [float(value) for value in row[1:]]
+            embeddings[post_id] = np.array(embedding, dtype=float)
     return embeddings
 
 
@@ -481,19 +502,6 @@ def plot_score_distribution(df, score_label, group_by, ax=None, ylim=None):
     logging.info(f'Non-null pivot scores (N={len(scores_nonna)} ({100*len(scores_nonna) / len(scores):.2f}%)):\n{fig.get_string()}\nmin={min(scores_nonna)}, max={max(scores_nonna)}, '
                   f'mean={sum(scores_nonna) / len(scores_nonna):.2f},')
 
-
-# def extract_sorted_subrange_by(df, sort_by, group_by, between):
-#     """
-#     I thought this would be useful for selecting, e.g., only posts from the middle 50% of the time a user was active.
-#     """
-#     start, end = between
-#     result = (df
-#               .sort_values(by=[group_by, sort_by])
-#               .groupby([group_by])
-#               .apply(lambda group: group.iloc[int(len(group)*start):
-#                                               int(len(group)*end)]))
-#     return result
-
 def create_id_text_dict(posts):
     """
     Create a dictionary mapping post IDs to their text content.
@@ -517,16 +525,13 @@ def create_id_text_dict(posts):
               selftext = ""
             id_text_dict[post_id] = {
                 'text': title + " "+ selftext,
-                'start_end': len(title)+1
-            }
+                'start_end': len(title)+1}
         elif row['type'] == 'comment':
             post_id = row['id']
             body = row.get("body", "")
             id_text_dict[post_id] = {
                 'text': body,
-                'start_end': 0
-            }
-
+                'start_end': 0}
         submission = row['submission']
         if pd.notnull(submission):
             post_id = submission.get("name")
@@ -539,27 +544,25 @@ def create_id_text_dict(posts):
                 'text': title + " " + submission.get("selftext"),
                 'start_end': len(title)+1
             }
-
         parent = row['parent']
         if pd.notnull(parent):
             post_id = parent.get("id")
             if parent.get("type") == "submission":
+                title = parent.get("title", "")
+                selftext = parent.get("selftext", "")
                 id_text_dict[post_id] = {
-                    'text': parent.get("selftext"),
-                    'start_end': 0
+                    'text':title + " "+ selftext,
+                    'start_end': len(title)+1
                 }
             elif parent.get("type") == "comment":
                 id_text_dict[post_id] = {
                     'text': parent.get("body"),
-                    'start_end': 0
-                }
-
+                    'start_end': 0}
         replies = row['replies']
         if replies is None or (isinstance(replies, (float, np.float64)) and np.isnan(replies)):
             replies = []
         elif not isinstance(replies, list):
             replies = []
-        
         # If replies is a list and not empty, proceed
         if pd.notnull(replies).any():
             for reply in replies:
@@ -567,9 +570,7 @@ def create_id_text_dict(posts):
                 id_text_dict[post_id] = {
                     'text': reply.get("body"),
                     'start_end': 0
-                }
-                
-    
+                }    
     return id_text_dict
 
 def scale_min_max(series: pd.Series):
@@ -586,7 +587,7 @@ def write_pairs_to_list(pairs, outfile):
         for n, (pivot, post) in enumerate(pairs):
             tsv_writer.writerow([n, post.text, pivot.text])
 
-def write_ent_pairs(pairs,outfile):
+def write_ent_pairs(pairs,posts,outfile):
     """
     Writes entailment pairs of sentences to a file in tsv format.
 
@@ -597,6 +598,7 @@ def write_ent_pairs(pairs,outfile):
     Returns:
         None
     """
+    id_text_dict = create_id_text_dict(posts)
     logging.info(f'Writing {len(pairs)} pairs to {outfile} in RTE format.')
     with open(outfile, 'w') as file:
         tsv_writer = csv.writer(file, delimiter='\t')

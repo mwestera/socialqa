@@ -51,7 +51,6 @@ def calculate_pivot_score(sentence: pd.Series,scaler_votes: MinMaxScaler):
     weights = get_weights()['pivot']
     vote_score = get_vote_score(sentence)
     vote_score_df = pd.DataFrame([vote_score], columns=['total_votes'])
-    #vote_score = np.array(vote_score).reshape(-1, 1)  # Reshape data to fit scaler
     scaled_vote_score = scaler_votes.transform(vote_score_df)[0][0]
     score = 0
     text = sentence['text']
@@ -74,9 +73,8 @@ def calculate_qa_scores(question: pd.Series, pivot: pd.Series, asym: bool = Fals
     # Same Subreddit
     score = 0
     score += weights['subreddit_weight'] * get_subreddit_score(question, pivot)
-    #score += weights['embeddings_weight'] * similarity_dict.get((question.id, pivot.id))
-
     return score
+
 def calculate_ent_scores(pivot: pd.Series, entailment: pd.Series, asym: bool = False) -> float:
     """
     How semantically similar or textually related are the two strings?
@@ -87,25 +85,8 @@ def calculate_ent_scores(pivot: pd.Series, entailment: pd.Series, asym: bool = F
     # Same Subreddit
     score = 0
     score += weights['subreddit_weight'] * get_subreddit_score(pivot, entailment)
-    #score += weights['embeddings_weight'] * similarity_dict.get((pivot.id, entailment.id))
-    #score += weights['time_weight'] * get_time_score(pivot, entailment)
     return score
 
-def get_time_score(post1, post2):
-    """
-    Calculate the time score based on the time difference between two posts.
-    """
-    # Time Difference
-    time1 = datetime.strptime(post1['user_post_created'], "%Y-%m-%d %H:%M:%S")
-    time2 = datetime.strptime(post2['user_post_created'], "%Y-%m-%d %H:%M:%S")
-    time_diff = abs((time2 - time1).total_seconds() / 60)
-
-    # Manually scale time_diff to [0, 1] based on a maximum of 1440 minutes (24 hours)
-    # Maximum time difference is 30 days in minutes
-    max_time_diff = 30 * 24 * 60
-    time_diff_score = 1 - (time_diff / max_time_diff)
-    score += time_diff_score
-    return time_diff_score
 
 def get_embedding(post_id):
     """
@@ -180,6 +161,8 @@ def get_vote_score(sentence):
         return 0
     
     upvotes, downvotes = get_number_of_votes(sentence['score'], sentence['upvote_ratio'])
+
+    # The more votes in total the more relevant the content is assumed to be
     votes  = upvotes + downvotes
     return votes
 
@@ -190,8 +173,6 @@ def get_length_score(sentence, mean_length=55, std_dev=15):
     text = sentence['text']
     tokens = text.split()
     length = len(tokens)
-    
-    # Parameters for the Gaussian function
     
     # Calculate the score using the Gaussian function
     score = np.exp(-((length - mean_length) ** 2) / (2 * std_dev ** 2))
